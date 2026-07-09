@@ -1,7 +1,9 @@
 # Local secrets
-.env
+.env.local
+.env.private
+.env.public-test
 .env.*
-!.env.example
+!.env.public-test.example
 
 # Podman / local runtime data
 *.log

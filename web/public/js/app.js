@@ -108,6 +108,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     await resetSteamCmd(btn);
   });
 
+  document.addEventListener('click', async e => {
+    const btn = e.target.closest('#btn-download-cdlcs');
+    if (!btn) return;
+    e.preventDefault();
+    await downloadCreatorDlcs(btn);
+  });
+
   window.addEventListener('hashchange', () => {
     const view = location.hash.replace('#', '');
     if (VIEWS.includes(view) && state.view !== view) loadView(view, false);
@@ -541,6 +548,7 @@ function initChart() {
 async function loadMods() {
   const container = document.getElementById('mod-list-container');
   initSteamCmdControls();
+  loadCreatorDlcs();
   loadModlists();
   loadPresetFiles();
   container.innerHTML = '<div class="text-muted text-center py-4"><i class="fa fa-spinner fa-spin me-2"></i>Loading…</div>';
@@ -588,11 +596,78 @@ async function loadMods() {
   document.getElementById('btn-refresh-mods').onclick = () => loadMods();
 }
 
+async function loadCreatorDlcs() {
+  const container = document.getElementById('creator-dlc-container');
+  if (!container) return;
+  container.innerHTML = '<div class="text-muted py-2"><i class="fa fa-spinner fa-spin me-2"></i>Checking Creator DLCs...</div>';
+  try {
+    const dlcs = await GET('/api/creator-dlcs');
+    renderCreatorDlcs(dlcs);
+  } catch (e) {
+    container.innerHTML = `<div class="text-danger py-2">${escHtml(e.message)}</div>`;
+  }
+  const refresh = document.getElementById('btn-refresh-cdlcs');
+  if (refresh) refresh.onclick = loadCreatorDlcs;
+}
+
+function renderCreatorDlcs(dlcs) {
+  const container = document.getElementById('creator-dlc-container');
+  if (!dlcs.length) {
+    container.innerHTML = '<div class="text-muted py-2">No Creator DLC definitions configured.</div>';
+    return;
+  }
+
+  container.innerHTML = `
+    <table class="mod-table">
+      <thead><tr>
+        <th>Name</th><th>Status</th><th class="text-center" style="width:90px">Active</th>
+      </tr></thead>
+      <tbody>
+        ${dlcs.map(dlc => `
+          <tr>
+            <td>
+              <div class="mod-name">${escHtml(dlc.name)}</div>
+              <span class="mod-id">${escHtml(dlc.folder)}</span>
+            </td>
+            <td>
+              <span class="badge ${dlc.available ? 'bg-success' : 'bg-secondary'}">
+                ${dlc.available ? 'Available' : 'Not installed'}
+              </span>
+            </td>
+            <td class="text-center">
+              <div class="form-check form-switch d-flex justify-content-center mb-0">
+                <input class="form-check-input" type="checkbox" data-cdlc-id="${escAttr(dlc.id)}" ${dlc.active ? 'checked' : ''} ${dlc.available ? '' : 'disabled'} title="Enable/Disable Creator DLC" />
+              </div>
+            </td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+    <div class="small text-muted mt-2">Only available DLC folders can be enabled. Enabled DLCs are added to the server startup -mod list.</div>`;
+
+  container.querySelectorAll('[data-cdlc-id]').forEach(toggle => {
+    toggle.onchange = async () => {
+      try {
+        await PUT(`/api/creator-dlcs/${encodeURIComponent(toggle.dataset.cdlcId)}`, { active: toggle.checked });
+        toast(toggle.checked ? 'Creator DLC enabled' : 'Creator DLC disabled');
+        loadStartupSettings();
+      } catch (e) {
+        toast(e.message, 'error');
+        toggle.checked = !toggle.checked;
+      }
+    };
+  });
+}
+
 async function loadPresetFiles() {
   const container = document.getElementById('saved-preset-files');
+  const select = document.getElementById('saved-preset-select');
   if (!container) return;
   try {
     const files = await GET('/api/mods/preset-files');
+    if (select) {
+      select.innerHTML = '<option value="">Saved presets on server</option>' + files.map(file =>
+        `<option value="${escAttr(file.path)}">${escHtml(file.name)}</option>`).join('');
+    }
     if (!files.length) {
       container.innerHTML = '<div class="text-muted small">No saved preset HTML files.</div>';
       return;
@@ -633,6 +708,18 @@ async function loadPresetFiles() {
         } catch (e) { toast(e.message, 'error'); }
       };
     });
+
+    const loadSaved = document.getElementById('btn-load-saved-preset');
+    if (loadSaved && select) {
+      loadSaved.onclick = async () => {
+        if (!select.value) { toast('Select a saved preset first', 'warning'); return; }
+        try {
+          const data = await POST('/api/mods/preset-files/load', { path: select.value });
+          showPresetPreview(data.mods, data.savedPath);
+          toast('Server preset loaded');
+        } catch (e) { toast(e.message, 'error'); }
+      };
+    }
   } catch (e) {
     container.innerHTML = `<div class="text-danger small">${e.message}</div>`;
   }
@@ -1282,6 +1369,27 @@ async function loadStartupSettings() {
       toast('Could not copy command', 'warning');
     }
   };
+
+}
+
+async function downloadCreatorDlcs(btn) {
+  if (btn.disabled) return;
+  if (!confirm('Download Creator DLC server files with SteamCMD? The task will use the Steam account already linked in SteamCMD.')) return;
+  btn.disabled = true;
+  try {
+    toast('Starting Creator DLC download...', 'warning');
+    const res = await POST('/api/server/download-creator-dlcs');
+    const extra = Array.isArray(res.configuredDlcAppIds) && res.configuredDlcAppIds.length
+      ? ` Extra App IDs: ${res.configuredDlcAppIds.join(', ')}`
+      : '';
+    toast(`Creator DLC download started.${extra}`, 'success');
+    loadView('logs');
+    setTimeout(loadCreatorDlcs, 2000);
+  } catch (e) {
+    handleSteamLoginRequired(e);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function fillStartupForm(s) {
@@ -1298,7 +1406,6 @@ function fillStartupForm(s) {
   setVal('startup-headless', s.headlessClients || 0);
   setVal('startup-steam-flags', s.steamCmdFlags || '');
   setChecked('startup-auto-update', s.automaticUpdates);
-  setChecked('startup-cdlc', s.downloadCreatorDlcs);
   setChecked('startup-lowercase', s.lowerCaseMods);
   setChecked('startup-validate', s.validateServerFiles);
   setChecked('startup-disable-battleye', s.disableBattleEye);
@@ -1323,7 +1430,6 @@ function readStartupForm() {
     headlessClients    : toInt('startup-headless', 0),
     steamCmdFlags      : getVal('startup-steam-flags'),
     automaticUpdates   : getChecked('startup-auto-update'),
-    downloadCreatorDlcs: getChecked('startup-cdlc'),
     lowerCaseMods      : getChecked('startup-lowercase'),
     validateServerFiles: getChecked('startup-validate'),
     disableBattleEye   : getChecked('startup-disable-battleye'),

@@ -134,7 +134,8 @@ api.MapGet("/steam/status", async () =>
 api.MapGet("/startup", async () =>
 {
     var settings = await store.GetStartupAsync(paths, cfg);
-    return Results.Json(new { settings, command = CommandBuilder.Build(paths, settings) });
+    var mods = await store.GetActiveCreatorDlcPathsAsync(cfg);
+    return Results.Json(new { settings, command = CommandBuilder.Build(paths, settings, mods) });
 });
 
 api.MapPut("/startup", async (StartupSettings settings, RuntimeState runtime) =>
@@ -142,13 +143,16 @@ api.MapPut("/startup", async (StartupSettings settings, RuntimeState runtime) =>
     settings = settings.Normalized(paths, cfg);
     await store.SaveStartupAsync(settings);
     await ServerCfgWriter.ApplyAsync(settings);
-    return Results.Json(new { settings, command = CommandBuilder.Build(paths, settings) });
+    var mods = await store.GetActiveCreatorDlcPathsAsync(cfg);
+    return Results.Json(new { settings, command = CommandBuilder.Build(paths, settings, mods) });
 });
 
 api.MapGet("/server/status", async (RuntimeState runtime) =>
 {
     var startup = await store.GetStartupAsync(paths, cfg);
-    var joinHost = Uri.TryCreate(cfg.BaseUrl, UriKind.Absolute, out var baseUri) ? baseUri.Host : "";
+    var joinHost = !string.IsNullOrWhiteSpace(cfg.PublicJoinHost)
+        ? cfg.PublicJoinHost
+        : Uri.TryCreate(cfg.BaseUrl, UriKind.Absolute, out var baseUri) ? baseUri.Host : "";
     return Results.Json(new { running = runtime.IsRunning, pid = runtime.ProcessId, port = startup.Port, joinHost });
 });
 
@@ -159,7 +163,7 @@ api.MapPost("/server/start", async (RuntimeState runtime) =>
     var bin = Path.Combine(cfg.Arma3Dir, startup.ServerBinary);
     if (Environment.GetEnvironmentVariable("MOCK_SERVER") != "true" && !File.Exists(bin))
         return Results.Json(new { error = "Server binary not found. Please install the server first." }, statusCode: 400);
-    var mods = await store.GetActiveModsAsync();
+    var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
     var lowercased = ModFileRepair.MakeLowercase(mods);
     if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
     runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
@@ -178,7 +182,7 @@ api.MapPost("/server/restart", async (RuntimeState runtime) =>
     if (runtime.IsRunning) runtime.Stop();
     await Task.Delay(1000);
     var startup = await store.GetStartupAsync(paths, cfg);
-    var mods = await store.GetActiveModsAsync();
+    var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
     var lowercased = ModFileRepair.MakeLowercase(mods);
     if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before restart");
     runtime.Start(Path.Combine(cfg.Arma3Dir, startup.ServerBinary), CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
@@ -190,7 +194,8 @@ api.MapPost("/server/install", async (RuntimeState runtime) =>
     var auth = await store.GetSteamAuthAsync();
     var user = ResolvedSteamUser(cfg, auth);
     if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
-    var args = SteamArgs(cfg, auth, "+app_update", "233780", "validate");
+    var startup = await store.GetStartupAsync(paths, cfg);
+    var args = SteamArgs(cfg, auth, ServerUpdateArgs(cfg, startup));
     runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "install");
     return Results.Json(new { ok = true, message = "Server installation started" });
 });
@@ -200,9 +205,32 @@ api.MapPost("/server/update", async (RuntimeState runtime) =>
     var auth = await store.GetSteamAuthAsync();
     var user = ResolvedSteamUser(cfg, auth);
     if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
-    var args = SteamArgs(cfg, auth, "+app_update", "233780", "validate");
+    var startup = await store.GetStartupAsync(paths, cfg);
+    var args = SteamArgs(cfg, auth, ServerUpdateArgs(cfg, startup));
     runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "update");
     return Results.Json(new { ok = true, message = "Update started" });
+});
+
+api.MapPost("/server/download-creator-dlcs", async (RuntimeState runtime) =>
+{
+    var auth = await store.GetSteamAuthAsync();
+    var user = ResolvedSteamUser(cfg, auth);
+    if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
+    var args = SteamArgs(cfg, auth, CreatorDlcDownloadArgs(cfg));
+    runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "creator-dlcs");
+    return Results.Json(new
+    {
+        ok = true,
+        message = "Creator DLC download started",
+        configuredDlcAppIds = cfg.CreatorDlcAppIds
+    });
+});
+
+api.MapGet("/creator-dlcs", async () => Results.Json(await store.GetCreatorDlcsAsync(cfg)));
+api.MapPut("/creator-dlcs/{id}", async (string id, CreatorDlcUpdate req) =>
+{
+    var dlc = await store.SetCreatorDlcActiveAsync(cfg, id, req.Active);
+    return dlc is null ? Results.Json(new { error = "Creator DLC not found" }, statusCode: 404) : Results.Json(dlc);
 });
 
 api.MapGet("/metrics", () =>
@@ -546,6 +574,24 @@ static string[] SteamArgs(AppConfig cfg, SteamAuth? auth, params string[] tail)
     return args.ToArray();
 }
 
+static string[] ServerUpdateArgs(AppConfig cfg, StartupSettings startup)
+{
+    var args = new List<string> { "+app_update", "233780" };
+    args.Add("validate");
+    args.AddRange(CommandBuilder.SplitArgs(startup.SteamCmdFlags));
+    return args.ToArray();
+}
+
+static string[] CreatorDlcDownloadArgs(AppConfig cfg)
+{
+    var args = new List<string> { "+app_update", "233780", "-beta", "creatordlc", "validate" };
+    foreach (var appId in cfg.CreatorDlcAppIds)
+    {
+        args.AddRange(["+app_update", appId, "validate"]);
+    }
+    return args.ToArray();
+}
+
 static async Task<int> FinalizeWorkshopModsAsync(AppConfig cfg, SqliteStore store, IEnumerable<PresetMod> mods)
 {
     var completed = 0;
@@ -647,18 +693,36 @@ static class ModFileRepair
     }
 }
 
-record AppConfig(int WebPort, string WebUsername, string WebPassword, string SessionSecret, string Arma3Dir, string SteamUser, string SteamPass, int ServerPort, string BaseUrl, HashSet<string> SteamOwnerIds, string? FrontendOrigin)
+static class CommandLog
+{
+    public static string Format(string file, IEnumerable<string> args)
+    {
+        var rendered = new List<string>();
+        foreach (var arg in args)
+        {
+            rendered.Add(QuoteArg(arg));
+        }
+        return $"{file} {string.Join(' ', rendered)}";
+    }
+
+    static string QuoteArg(string arg) => arg.Any(char.IsWhiteSpace) ? $"\"{arg.Replace("\"", "\\\"")}\"" : arg;
+}
+
+record AppConfig(int WebPort, string WebUsername, string WebPassword, string SessionSecret, string Arma3Dir, string SteamUser, string SteamPass, int ServerPort, int ServerMaxPlayers, string BaseUrl, string PublicJoinHost, string[] CreatorDlcAppIds, HashSet<string> SteamOwnerIds, string? FrontendOrigin)
 {
     public static AppConfig FromEnvironment() => new(
         int.Parse(Environment.GetEnvironmentVariable("WEB_PORT") ?? "8080"),
         Environment.GetEnvironmentVariable("WEB_USERNAME") ?? "admin",
-        Environment.GetEnvironmentVariable("WEB_PASSWORD") ?? "changeme123",
+        Environment.GetEnvironmentVariable("WEB_PASSWORD") ?? "change_this_panel_password",
         Environment.GetEnvironmentVariable("SESSION_SECRET") ?? Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
         Environment.GetEnvironmentVariable("ARMA3_DIR") ?? "/arma3",
         Environment.GetEnvironmentVariable("STEAM_USER") ?? "anonymous",
         Environment.GetEnvironmentVariable("STEAM_PASS") ?? "",
         int.Parse(Environment.GetEnvironmentVariable("SERVER_PORT") ?? "2302"),
+        int.Parse(Environment.GetEnvironmentVariable("SERVER_MAX_PLAYERS") ?? "40"),
         Environment.GetEnvironmentVariable("BASE_URL") ?? "",
+        Environment.GetEnvironmentVariable("PUBLIC_JOIN_HOST") ?? "",
+        (Environment.GetEnvironmentVariable("CREATOR_DLC_APP_IDS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(id => Regex.IsMatch(id, @"^\d+$")).Distinct().ToArray(),
         (Environment.GetEnvironmentVariable("STEAM_OWNER_IDS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(),
         Environment.GetEnvironmentVariable("FRONTEND_ORIGIN"));
 }
@@ -709,17 +773,18 @@ record StartupSettings(string ServerBinary, string Ip, int Port, string Profiles
 {
     public StartupSettings Normalized(ServerPaths paths, AppConfig cfg) => this with
     {
-        ServerBinary = string.IsNullOrWhiteSpace(ServerBinary) ? Path.GetFileName(paths.Arma3Bin) : Path.GetFileName(ServerBinary),
+        ServerBinary = "arma3server_x64",
         Ip = string.IsNullOrWhiteSpace(Ip) ? "0.0.0.0" : Ip,
         Port = Port is < 1 or > 65535 ? cfg.ServerPort : Port,
         ProfilesDir = string.IsNullOrWhiteSpace(ProfilesDir) ? paths.ProfilesDir : ProfilesDir,
         ServerCfg = string.IsNullOrWhiteSpace(ServerCfg) ? Path.Combine(paths.ConfigDir, "server.cfg") : ServerCfg,
         BasicCfg = string.IsNullOrWhiteSpace(BasicCfg) ? Path.Combine(paths.ConfigDir, "basic.cfg") : BasicCfg,
+        MaxPlayers = MaxPlayers ?? cfg.ServerMaxPlayers,
         ExtraPorts = ExtraPorts.Where(p => p is > 0 and < 65536).Distinct().ToArray(),
         HeadlessClients = Math.Clamp(HeadlessClients, 0, 5)
     };
 
-    public static StartupSettings Default(ServerPaths paths, AppConfig cfg) => new(Path.GetFileName(paths.Arma3Bin), "0.0.0.0", cfg.ServerPort, paths.ProfilesDir, Path.Combine(paths.ConfigDir, "server.cfg"), Path.Combine(paths.ConfigDir, "basic.cfg"), "-autoInit -preload -limitFPS=120 -bandwidthAlg=2 -maxFileCacheSize -noSound", null, "", false, false, false, false, false, "", "", [], 0, "");
+    public static StartupSettings Default(ServerPaths paths, AppConfig cfg) => new("arma3server_x64", "0.0.0.0", cfg.ServerPort, paths.ProfilesDir, Path.Combine(paths.ConfigDir, "server.cfg"), Path.Combine(paths.ConfigDir, "basic.cfg"), "-autoInit -preload -limitFPS=120 -bandwidthAlg=2 -maxFileCacheSize -noSound", cfg.ServerMaxPlayers, "", false, false, false, false, false, "", "", [], 0, "");
 }
 
 record Mod(string Id, string Name, string Path, bool Active, string? WorkshopId);
@@ -736,6 +801,8 @@ record InstallModRequest(string WorkshopId, string? Name);
 record InstallBatchRequest(List<PresetMod> Mods);
 record ModlistSaveRequest(string Name, List<PresetMod> Mods, bool Activate);
 record PresetFileLoadRequest(string Path);
+record CreatorDlcUpdate(bool Active);
+record CreatorDlc(string Id, string Name, string Folder, string Path, bool Available, bool Active);
 
 static class PasswordHasher
 {
@@ -799,6 +866,29 @@ static class MetricsReader
         return long.TryParse(value, out var parsed) ? parsed : null;
     }
 }
+
+static class CreatorDlcCatalog
+{
+    static readonly (string Id, string Name, string Folder)[] Known =
+    [
+        ("gm", "Global Mobilization", "gm"),
+        ("vn", "S.O.G. Prairie Fire", "vn"),
+        ("csla", "CSLA Iron Curtain", "csla"),
+        ("ws", "Western Sahara", "ws"),
+        ("spe", "Spearhead 1944", "spe"),
+        ("rf", "Reaction Forces", "rf"),
+        ("ef", "Expeditionary Forces", "ef")
+    ];
+
+    public static List<CreatorDlc> List(AppConfig cfg) => Known
+        .Select(x =>
+        {
+            var path = Path.Combine(cfg.Arma3Dir, x.Folder);
+            return new CreatorDlc(x.Id, x.Name, x.Folder, path, Directory.Exists(path), false);
+        })
+        .ToList();
+}
+
 record FileWriteRequest(string Path, string Content);
 record FileRenameRequest(string Path, string NewName);
 record ConfigWriteRequest(string File, string Content);
@@ -863,6 +953,35 @@ class SqliteStore(string dbPath)
         return raw is null ? null : JsonSerializer.Deserialize<SteamAuth>(raw, json);
     }
     public Task SaveSteamAuthAsync(string username) => SetRawStateAsync("steamcmd-auth", JsonSerializer.Serialize(new SteamAuth(username, DateTimeOffset.UtcNow), json));
+
+    public async Task<List<CreatorDlc>> GetCreatorDlcsAsync(AppConfig cfg)
+    {
+        var active = await GetActiveCreatorDlcIdsAsync();
+        return CreatorDlcCatalog.List(cfg)
+            .Select(d => d with { Active = active.Contains(d.Id) && d.Available })
+            .ToList();
+    }
+    public async Task<CreatorDlc?> SetCreatorDlcActiveAsync(AppConfig cfg, string id, bool active)
+    {
+        var dlcs = CreatorDlcCatalog.List(cfg);
+        var selected = dlcs.FirstOrDefault(d => d.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+        if (selected is null) return null;
+        var activeIds = await GetActiveCreatorDlcIdsAsync();
+        activeIds.RemoveWhere(x => x.Equals(id, StringComparison.OrdinalIgnoreCase));
+        if (active && selected.Available) activeIds.Add(selected.Id);
+        await SetRawStateAsync("creator-dlcs-active", JsonSerializer.Serialize(activeIds.Order().ToArray(), json));
+        return selected with { Active = active && selected.Available };
+    }
+    public async Task<List<string>> GetActiveCreatorDlcPathsAsync(AppConfig cfg) =>
+        (await GetCreatorDlcsAsync(cfg)).Where(d => d.Active && d.Available).Select(d => d.Path).ToList();
+
+    async Task<HashSet<string>> GetActiveCreatorDlcIdsAsync()
+    {
+        var raw = await GetRawStateAsync("creator-dlcs-active");
+        return raw is null
+            ? new(StringComparer.OrdinalIgnoreCase)
+            : new(JsonSerializer.Deserialize<string[]>(raw, json) ?? [], StringComparer.OrdinalIgnoreCase);
+    }
 
     public async Task<List<Mod>> SyncAndGetModsAsync(string root)
     {
@@ -1045,6 +1164,7 @@ class RuntimeState
             {
                 using var p = StartProcess(file, capturedArgs, Directory.GetCurrentDirectory());
                 Push("system", $"Task {kind} started PID {p.Id}");
+                Push("system", $"Command: {CommandLog.Format(file, RedactSteamArgs(capturedArgs))}");
                 await p.WaitForExitAsync();
                 Push("system", $"Task {kind} exited with code {p.ExitCode}");
                 if (onExit is not null) await onExit(p.ExitCode);
@@ -1058,6 +1178,24 @@ class RuntimeState
                 taskGate.Release();
             }
         });
+    }
+    static IEnumerable<string> RedactSteamArgs(string[] args)
+    {
+        var redactingLogin = false;
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "+login")
+            {
+                redactingLogin = true;
+                yield return args[i];
+                continue;
+            }
+            if (redactingLogin && args[i].StartsWith('+'))
+            {
+                redactingLogin = false;
+            }
+            yield return redactingLogin ? "***" : args[i];
+        }
     }
     Process StartProcess(string file, IEnumerable<string> args, string cwd)
     {
@@ -1172,7 +1310,7 @@ class SteamCmdSession(ServerPaths paths)
 
 static class CommandBuilder
 {
-    public static string Build(ServerPaths paths, StartupSettings s) => "./" + s.ServerBinary + " " + string.Join(' ', Args(paths, s, []).Select(Quote));
+    public static string Build(ServerPaths paths, StartupSettings s, IEnumerable<string>? mods = null) => "./" + s.ServerBinary + " " + string.Join(' ', Args(paths, s, mods ?? []).Select(Quote));
     public static IEnumerable<string> Args(ServerPaths paths, StartupSettings s, IEnumerable<string> mods)
     {
         // Only set -ip= when binding to a specific interface (not 0.0.0.0).
@@ -1191,7 +1329,7 @@ static class CommandBuilder
         if (s.DisableBattleEye) yield return "-noBattlEye";
         foreach (var arg in SplitArgs(s.ExtraParams)) yield return arg;
     }
-    static IEnumerable<string> SplitArgs(string value) => Regex.Matches(value ?? "", @"[^\s""]+|""([^""]*)""").Select(m => m.Value.Trim('"'));
+    public static IEnumerable<string> SplitArgs(string value) => Regex.Matches(value ?? "", @"[^\s""]+|""([^""]*)""").Select(m => m.Value.Trim('"'));
     static string Quote(string arg) => arg.Any(char.IsWhiteSpace) ? $"\"{arg.Replace("\"", "\\\"")}\"" : arg;
 }
 

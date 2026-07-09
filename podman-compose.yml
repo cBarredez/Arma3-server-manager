@@ -17,14 +17,16 @@ services:
       STEAM_PASS: ${STEAM_PASS:-}
       WEB_PORT: 8080
       WEB_USERNAME: ${WEB_USERNAME:-admin}
-      WEB_PASSWORD: ${WEB_PASSWORD:-changeme123}
+      WEB_PASSWORD: ${WEB_PASSWORD:-change_this_panel_password}
       SESSION_SECRET: ${SESSION_SECRET:-change_this_random_secret}
       SERVER_PORT: ${SERVER_PORT:-2302}
       SERVER_NAME: ${SERVER_NAME:-My Arma 3 Server}
       SERVER_PASSWORD: ${SERVER_PASSWORD:-}
       SERVER_PASSWORD_ADMIN: ${SERVER_PASSWORD_ADMIN:-adminpass}
-      SERVER_MAX_PLAYERS: ${SERVER_MAX_PLAYERS:-32}
+      SERVER_MAX_PLAYERS: ${SERVER_MAX_PLAYERS:-40}
       BASE_URL: ${BASE_URL:-}
+      PUBLIC_JOIN_HOST: ${PUBLIC_JOIN_HOST:-}
+      CREATOR_DLC_APP_IDS: ${CREATOR_DLC_APP_IDS:-}
       STEAM_OWNER_IDS: ${STEAM_OWNER_IDS:-}
       ARMA3_DIR: /arma3
       TZ: ${TZ:-UTC}
@@ -63,7 +65,7 @@ services:
       # Host networking mode : 10.89.0.1:8081  — set via podman-compose.host.yml.
       ARMA3_API_BACKEND: ${ARMA3_API_BACKEND:-api:8080}
     ports:
-      - "${WEB_PORT:-8080}:8080/tcp"
+      - "${WEB_BIND_IP:-127.0.0.1}:${WEB_PORT:-8080}:8080/tcp"
 
 volumes:
   arma3-server:

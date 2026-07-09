@@ -135,6 +135,7 @@ def podman_native(env_file, *args):
     FRONT_NAME= env.get("FRONTEND_CONTAINER_NAME", "arma3-frontend")
 
     web_port   = env.get("WEB_PORT", "8080")
+    web_bind_ip= env.get("WEB_BIND_IP", "127.0.0.1")
     srv_port   = env.get("SERVER_PORT", "2302")
     query_port = env.get("SERVER_QUERY_PORT", "2303")
     be_port    = env.get("BATTLEYE_PORT", "2304")
@@ -178,7 +179,7 @@ def podman_native(env_file, *args):
             "STEAM_USER", "STEAM_PASS", "WEB_PORT", "WEB_USERNAME", "WEB_PASSWORD",
             "SESSION_SECRET", "SERVER_PORT", "SERVER_NAME", "SERVER_PASSWORD",
             "SERVER_PASSWORD_ADMIN", "SERVER_MAX_PLAYERS", "BASE_URL",
-            "STEAM_OWNER_IDS", "ARMA3_DIR", "TZ",
+            "PUBLIC_JOIN_HOST", "CREATOR_DLC_APP_IDS", "STEAM_OWNER_IDS", "ARMA3_DIR", "TZ",
         ])
         api_cmd += ["-e", "WEB_PORT=8080", "-e", "ARMA3_DIR=/arma3", API_IMG]
         code = run(api_cmd)
@@ -190,7 +191,7 @@ def podman_native(env_file, *args):
             "podman", "run", "-d", "--replace",
             "--name", FRONT_NAME,
             "--network", NET,
-            "-p", f"{web_port}:8080/tcp",
+            "-p", f"{web_bind_ip}:{web_port}:8080/tcp",
             "-e", "ARMA3_API_BASE=",
             "-e", "ARMA3_REST_ONLY=true",
             "-e", f"ARMA3_API_BACKEND={API_NAME}:8080",
@@ -356,7 +357,7 @@ def main():
                 "WEB_USERNAME"    : env.get("WEB_USERNAME", "admin"),
                 "WEB_PASSWORD"    : env.get("WEB_PASSWORD", "admin"),
                 "SESSION_SECRET"  : env.get("SESSION_SECRET", "wsl-test-secret"),
-                "STEAM_OWNER_IDS" : env.get("STEAM_OWNER_IDS", "76561198074208173"),
+                "STEAM_OWNER_IDS" : env.get("STEAM_OWNER_IDS", ""),
                 "ASPNETCORE_URLS" : f"http://0.0.0.0:{web_port}",
                 "DOTNET_NOLOGO"   : "1",
             }.items()
