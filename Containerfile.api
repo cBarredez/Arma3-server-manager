@@ -1,0 +1,63 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY backend/Arma3Manager.Api/Arma3Manager.Api.csproj backend/Arma3Manager.Api/
+RUN dotnet restore backend/Arma3Manager.Api/Arma3Manager.Api.csproj
+COPY backend/Arma3Manager.Api/ backend/Arma3Manager.Api/
+RUN dotnet publish backend/Arma3Manager.Api/Arma3Manager.Api.csproj -c Release -o /out --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ARMA3_DIR=/arma3
+ENV STEAMCMD_DIR=/steamcmd
+ENV WEB_PORT=8080
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080
+
+RUN dpkg --add-architecture i386 \
+    && apt-get update \
+    && apt-get install -y \
+      lib32gcc-s1 \
+      lib32stdc++6 \
+      libsdl2-2.0-0 \
+      libcurl4 \
+      ca-certificates \
+      curl \
+      wget \
+      unzip \
+      tar \
+      tini \
+      locales \
+      tzdata \
+    && locale-gen en_US.UTF-8 \
+    && update-locale LANG=en_US.UTF-8 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+
+RUN if ! id -u arma3 >/dev/null 2>&1; then useradd -m -s /bin/bash arma3; fi \
+    && mkdir -p ${STEAMCMD_DIR} ${ARMA3_DIR} /home/arma3/Steam /home/arma3/.steam \
+    && cd ${STEAMCMD_DIR} \
+    && curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar zxvf - \
+    && chown -R arma3:arma3 ${STEAMCMD_DIR} ${ARMA3_DIR} /home/arma3/Steam /home/arma3/.steam
+
+COPY config/ /defaults/config/
+RUN chown -R arma3:arma3 /defaults
+
+WORKDIR /app
+COPY --from=build /out/ ./
+RUN chown -R arma3:arma3 /app
+
+EXPOSE 8080/tcp
+EXPOSE 2302/udp
+EXPOSE 2303/udp
+EXPOSE 2304/udp
+EXPOSE 2305/udp
+EXPOSE 2306/udp
+
+VOLUME ["/arma3", "/home/arma3/Steam", "/home/arma3/.steam", "/home/arma3/.aspnet"]
+
+USER arma3
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["dotnet", "Arma3Manager.Api.dll"]

@@ -1,0 +1,63 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Containerfile.api
+    image: localhost/arma3-manager-api:latest
+    container_name: arma3-api
+    restart: unless-stopped
+    mem_limit: ${SERVER_MEM_LIMIT:-14g}
+    environment:
+      STEAM_USER: ${STEAM_USER:-}
+      STEAM_PASS: ${STEAM_PASS:-}
+      WEB_PORT: 8080
+      WEB_USERNAME: ${WEB_USERNAME:-admin}
+      WEB_PASSWORD: ${WEB_PASSWORD:-changeme123}
+      SESSION_SECRET: ${SESSION_SECRET:-change_this_random_secret}
+      SERVER_PORT: ${SERVER_PORT:-2302}
+      SERVER_NAME: ${SERVER_NAME:-My Arma 3 Server}
+      SERVER_PASSWORD: ${SERVER_PASSWORD:-}
+      SERVER_PASSWORD_ADMIN: ${SERVER_PASSWORD_ADMIN:-adminpass}
+      SERVER_MAX_PLAYERS: ${SERVER_MAX_PLAYERS:-32}
+      BASE_URL: ${BASE_URL:-}
+      STEAM_OWNER_IDS: ${STEAM_OWNER_IDS:-}
+      ARMA3_DIR: /arma3
+      TZ: ${TZ:-UTC}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-}
+    ports:
+      - "${SERVER_PORT:-2302}:2302/udp"
+      - "${SERVER_QUERY_PORT:-2303}:2303/udp"
+      - "${BATTLEYE_PORT:-2304}:2304/udp"
+      - "${VON_PORT:-2305}:2305/udp"
+    volumes:
+      - arma3-server:/arma3
+      - steam-home:/home/arma3/Steam
+      - steam-config:/home/arma3/.steam
+      - aspnet-keys:/home/arma3/.aspnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Containerfile.frontend
+    image: localhost/arma3-manager-frontend:latest
+    container_name: arma3-frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      ARMA3_API_BASE: ""
+      ARMA3_REST_ONLY: "true"
+    ports:
+      - "${WEB_PORT:-8080}:8080/tcp"
+
+volumes:
+  arma3-server:
+  steam-home:
+  steam-config:
+  aspnet-keys:

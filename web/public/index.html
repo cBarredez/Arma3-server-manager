@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arma 3 Server Manager</title>
+
+  <!-- Bootstrap 5 -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <!-- Font Awesome -->
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet" />
+  <!-- Google Font -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <!-- Custom styles -->
+  <link href="/static/css/style.css" rel="stylesheet" />
+</head>
+<body>
+
+<!-- ════ LOGIN OVERLAY ══════════════════════════════════════════════════════ -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <i class="fa-solid fa-crosshairs"></i>
+    </div>
+    <h4 class="login-title">Arma 3 Server Manager</h4>
+    <p class="login-sub">Sign in to continue</p>
+    <div id="login-error" class="alert alert-danger d-none"></div>
+    <form id="login-form">
+      <div class="mb-3">
+        <input type="text" id="login-user" class="form-control" placeholder="Username" autocomplete="username" required />
+      </div>
+      <div class="mb-3">
+        <input type="password" id="login-pass" class="form-control" placeholder="Password" autocomplete="current-password" required />
+      </div>
+      <button type="submit" class="btn btn-primary w-100">
+        <i class="fa fa-sign-in-alt me-2"></i>Sign In
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- ════ MAIN APP ══════════════════════════════════════════════════════════ -->
+<div id="app" class="d-none">
+
+  <!-- Sidebar -->
+  <nav id="sidebar">
+    <div class="sidebar-brand">
+      <i class="fa-solid fa-crosshairs me-2"></i>
+      <span>A3 Manager</span>
+    </div>
+    <ul class="sidebar-nav">
+      <li><a href="#dashboard" class="nav-link active" data-view="dashboard"><i class="fa fa-gauge-high"></i><span>Dashboard</span></a></li>
+      <li><a href="#mods" class="nav-link" data-view="mods"><i class="fa fa-puzzle-piece"></i><span>Mods</span></a></li>
+      <li><a href="#files" class="nav-link" data-view="files"><i class="fa fa-folder-open"></i><span>File Manager</span></a></li>
+      <li><a href="#config" class="nav-link" data-view="config"><i class="fa fa-sliders"></i><span>Config Editor</span></a></li>
+      <li><a href="#logs" class="nav-link" data-view="logs"><i class="fa fa-terminal"></i><span>Server Logs</span></a></li>
+      <li><a href="#settings" class="nav-link" data-view="settings"><i class="fa fa-gear"></i><span>Settings</span></a></li>
+    </ul>
+    <div class="sidebar-footer">
+      <button id="btn-logout" class="btn btn-sm btn-outline-secondary w-100">
+        <i class="fa fa-sign-out-alt me-1"></i>Logout
+      </button>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div id="main">
+    <!-- Top bar -->
+    <header id="topbar">
+      <button id="sidebar-toggle" class="btn btn-icon me-3">
+        <i class="fa fa-bars"></i>
+      </button>
+      <div class="topbar-title" id="page-title">Dashboard</div>
+      <div class="ms-auto d-flex align-items-center gap-3">
+        <div id="server-status-badge">
+          <span class="status-dot offline"></span>
+          <span id="status-text">Offline</span>
+        </div>
+        <div class="server-controls">
+          <button id="btn-start"   class="btn btn-success btn-sm"><i class="fa fa-play me-1"></i>Start</button>
+          <button id="btn-stop"    class="btn btn-danger btn-sm"><i class="fa fa-stop me-1"></i>Stop</button>
+          <button id="btn-restart" class="btn btn-warning btn-sm"><i class="fa fa-rotate me-1"></i>Restart</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Views -->
+    <main id="content">
+
+      <!-- ── DASHBOARD ───────────────────────────────────────────── -->
+      <div id="view-dashboard" class="view">
+
+        <!-- Server Control Card -->
+        <div class="card-panel server-control-card mb-4">
+          <div class="d-flex align-items-center justify-content-between flex-wrap gap-3">
+            <!-- Status display -->
+            <div class="d-flex align-items-center gap-3">
+              <div id="dash-status-ring" class="status-ring offline">
+                <i class="fa fa-server"></i>
+              </div>
+              <div>
+                <div class="server-ctrl-title">Arma 3 Server</div>
+                <div class="d-flex align-items-center gap-2 mt-1">
+                  <span class="status-dot offline" id="dash-status-dot"></span>
+                  <span id="dash-status-text" class="server-ctrl-status">Offline</span>
+                  <span class="text-muted small" id="dash-pid-text"></span>
+                </div>
+              </div>
+            </div>
+            <!-- Big control buttons -->
+            <div class="d-flex gap-2 flex-wrap">
+              <button id="dash-btn-start" class="btn btn-ctrl btn-ctrl-start">
+                <i class="fa fa-play"></i>
+                <span>Start</span>
+              </button>
+              <button id="dash-btn-stop" class="btn btn-ctrl btn-ctrl-stop" disabled>
+                <i class="fa fa-stop"></i>
+                <span>Stop</span>
+              </button>
+              <button id="dash-btn-restart" class="btn btn-ctrl btn-ctrl-restart" disabled>
+                <i class="fa fa-rotate"></i>
+                <span>Restart</span>
+              </button>
+            </div>
+          </div>
+          <!-- Uptime / action feedback bar -->
+          <div id="dash-action-bar" class="action-bar mt-3 d-none">
+            <div class="action-bar-inner">
+              <i class="fa fa-spinner fa-spin me-2"></i>
+              <span id="dash-action-msg">Processing…</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Metric cards -->
+        <div class="row g-4 mb-4">
+          <div class="col-6 col-md-3">
+            <div class="metric-card">
+              <div class="metric-icon cpu"><i class="fa fa-microchip"></i></div>
+              <div>
+                <div class="metric-value" id="m-cpu">—</div>
+                <div class="metric-label">CPU Usage</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="metric-card">
+              <div class="metric-icon mem"><i class="fa fa-memory"></i></div>
+              <div>
+                <div class="metric-value" id="m-mem">—</div>
+                <div class="metric-subvalue" id="m-mem-detail">—</div>
+                <div class="metric-label">RAM Usage</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="metric-card">
+              <div class="metric-icon disk"><i class="fa fa-hard-drive"></i></div>
+              <div>
+                <div class="metric-value" id="m-disk">—</div>
+                <div class="metric-subvalue" id="m-disk-detail">—</div>
+                <div class="metric-label">Disk Used</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="metric-card">
+              <div class="metric-icon temp"><i class="fa fa-temperature-half"></i></div>
+              <div>
+                <div class="metric-value" id="m-temp">—</div>
+                <div class="metric-label">CPU Temp</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row g-4">
+          <div class="col-lg-8">
+            <div class="card-panel">
+              <div class="panel-header">
+                <i class="fa fa-chart-line me-2"></i>Resource History
+              </div>
+              <canvas id="chart-metrics" height="120"></canvas>
+            </div>
+          </div>
+          <div class="col-lg-4">
+            <div class="card-panel h-100">
+              <div class="panel-header"><i class="fa fa-server me-2"></i>Server Info</div>
+              <div class="info-list">
+                <div class="info-row"><span>Status</span><span id="info-status" class="badge bg-danger">Offline</span></div>
+                <div class="info-row"><span>PID</span><span id="info-pid">—</span></div>
+                <div class="info-row"><span>Game Port</span><span id="info-port">—</span></div>
+                <div class="info-row"><span>Active Mods</span><span id="info-mods">—</span></div>
+              </div>
+              <hr class="divider" />
+              <div class="panel-header"><i class="fa fa-wrench me-2"></i>Quick Actions</div>
+              <div class="d-grid gap-2 mt-2">
+                <button id="btn-install-server" class="btn btn-outline-primary btn-sm">
+                  <i class="fa fa-download me-1"></i>Install / Update Server
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── MODS ───────────────────────────────────────────────── -->
+      <div id="view-mods" class="view d-none">
+
+        <div id="steamcmd-panel" class="card-panel mb-3">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
+              <div class="panel-header mb-1"><i class="fab fa-steam me-2"></i>SteamCMD Session</div>
+              <div class="small text-muted">
+                <span id="steamcmd-status-badge" class="badge bg-secondary me-2">Unknown</span>
+                <span id="steamcmd-status-text">Checking SteamCMD status...</span>
+              </div>
+            </div>
+            <div class="d-flex gap-2 flex-wrap">
+              <button id="btn-open-steamcmd" class="btn btn-sm btn-outline-primary">
+                <i class="fa fa-key me-1"></i>SteamCMD Login
+              </button>
+              <button class="btn btn-sm btn-outline-warning btn-reset-steamcmd">
+                <i class="fa fa-broom me-1"></i>Reset SteamCMD
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Steam credential warning (shown when using anonymous login) -->
+        <div id="steam-anon-warning" class="alert alert-warning d-flex gap-2 align-items-start mb-3 d-none">
+          <i class="fa fa-triangle-exclamation mt-1 flex-shrink-0"></i>
+          <div>
+            <strong>SteamCMD login required.</strong>
+            First-time installs need a Steam account and may ask for Steam Guard on your phone.
+            Open SteamCMD Login, accept the verification, then retry the install.
+          </div>
+        </div>
+
+        <div class="card-panel mb-3">
+          <div class="panel-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-list-ul me-2"></i>Modlists</span>
+            <button id="btn-refresh-modlists" class="btn btn-sm btn-outline-secondary">
+              <i class="fa fa-rotate"></i>
+            </button>
+          </div>
+          <div id="modlist-container" class="mt-2">
+            <div class="text-muted py-2">Loading...</div>
+          </div>
+        </div>
+
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <div class="card-panel">
+              <div class="panel-header"><i class="fa fa-plus-circle me-2"></i>Install Mod by Workshop ID</div>
+              <div class="input-group mt-2">
+                <input type="text" id="mod-id-input" class="form-control" placeholder="e.g. 463939057" />
+                <button id="btn-install-mod" class="btn btn-primary">
+                  <i class="fa fa-download me-1"></i>Install
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card-panel">
+              <div class="panel-header"><i class="fa fa-file-import me-2"></i>Import HTML Preset</div>
+              <div class="mt-2">
+                <input type="file" id="preset-file" class="form-control" accept=".html" />
+                <button id="btn-load-preset" class="btn btn-secondary mt-2 w-100">
+                  <i class="fa fa-upload me-1"></i>Load Preset
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Preset preview modal -->
+        <div id="preset-preview" class="card-panel d-none mb-3">
+          <div class="panel-header"><i class="fa fa-list-check me-2"></i>Mods in Preset <span id="preset-name"></span></div>
+          <p class="text-muted small mt-2">Select mods to install:</p>
+          <div class="input-group mb-3">
+            <input id="preset-save-name" class="form-control" placeholder="Modlist name" />
+            <button id="btn-save-modlist" class="btn btn-outline-primary">
+              <i class="fa fa-floppy-disk me-1"></i>Save Modlist
+            </button>
+          </div>
+          <div id="preset-mod-list"></div>
+          <div class="mt-3 d-flex gap-2">
+            <button id="btn-preset-select-all" class="btn btn-sm btn-outline-secondary">Select All</button>
+            <button id="btn-install-preset" class="btn btn-sm btn-success">
+              <i class="fa fa-download me-1"></i>Install Selected
+            </button>
+          </div>
+        </div>
+
+        <!-- Install progress -->
+        <div id="install-progress" class="card-panel d-none mb-3">
+          <div class="panel-header"><i class="fa fa-spinner fa-spin me-2"></i>Installing…</div>
+          <pre id="install-log" class="log-box mt-2"></pre>
+        </div>
+
+        <!-- Mod list -->
+        <div class="card-panel">
+          <div class="panel-header d-flex justify-content-between">
+            <span><i class="fa fa-puzzle-piece me-2"></i>Installed Mods</span>
+            <button id="btn-refresh-mods" class="btn btn-sm btn-outline-secondary">
+              <i class="fa fa-rotate"></i>
+            </button>
+          </div>
+          <div id="mod-list-container" class="mt-3">
+            <div class="text-muted text-center py-4">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── FILE MANAGER ───────────────────────────────────────── -->
+      <div id="view-files" class="view d-none">
+        <div class="card-panel">
+          <div class="panel-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-folder-open me-2"></i>File Manager</span>
+            <div class="d-flex gap-2">
+              <label class="btn btn-sm btn-outline-primary mb-0">
+                <i class="fa fa-upload me-1"></i>Upload
+                <input type="file" id="file-upload-input" class="d-none" multiple />
+              </label>
+            </div>
+          </div>
+          <nav id="breadcrumb" aria-label="breadcrumb" class="mt-2">
+            <ol class="breadcrumb mb-0" id="breadcrumb-list"></ol>
+          </nav>
+          <div id="file-list" class="mt-3"></div>
+        </div>
+        <!-- Inline editor -->
+        <div id="file-editor-panel" class="card-panel mt-3 d-none">
+          <div class="panel-header d-flex justify-content-between">
+            <span id="editor-filename"></span>
+            <button id="btn-save-file" class="btn btn-sm btn-success">
+              <i class="fa fa-floppy-disk me-1"></i>Save
+            </button>
+          </div>
+          <textarea id="file-editor" class="code-editor mt-2" spellcheck="false"></textarea>
+        </div>
+      </div>
+
+      <!-- ── CONFIG EDITOR ──────────────────────────────────────── -->
+      <div id="view-config" class="view d-none">
+        <div class="card-panel mb-3">
+          <div class="panel-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-terminal me-2"></i>Startup Command</span>
+            <button id="btn-copy-startup-command" class="btn btn-sm btn-outline-primary">
+              <i class="fa fa-copy me-1"></i>Copy
+            </button>
+          </div>
+          <pre id="startup-command" class="log-box mt-2"></pre>
+        </div>
+
+        <div class="card-panel mb-3">
+          <div class="panel-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-power-off me-2"></i>Startup Settings</span>
+            <button id="btn-save-startup" class="btn btn-sm btn-success">
+              <i class="fa fa-floppy-disk me-1"></i>Save Startup
+            </button>
+          </div>
+          <div class="row g-3 mt-1">
+            <div class="col-md-4"><label class="form-label">Server Binary</label><select id="startup-binary" class="form-select"><option value="arma3server_x64">arma3server_x64</option><option value="arma3server">arma3server</option></select></div>
+            <div class="col-md-4"><label class="form-label">Bind IP</label><input id="startup-ip" class="form-control" placeholder="0.0.0.0" /></div>
+            <div class="col-md-4"><label class="form-label">Game Port</label><input id="startup-port" class="form-control" type="number" min="1" max="65535" /></div>
+            <div class="col-md-6"><label class="form-label">Profiles Directory</label><input id="startup-profiles" class="form-control" /></div>
+            <div class="col-md-3"><label class="form-label">Max Players</label><input id="startup-max-players" class="form-control" type="number" min="1" max="256" /></div>
+            <div class="col-md-3"><label class="form-label">Server Password</label><input id="startup-password" class="form-control" /></div>
+            <div class="col-12"><label class="form-label">Extra Startup Parameters</label><input id="startup-extra" class="form-control" /></div>
+            <div class="col-md-6"><label class="form-label">Server-Side Only Mods</label><input id="startup-server-mods" class="form-control" placeholder="@servermod;@another;" /></div>
+            <div class="col-md-6"><label class="form-label">Optional Client-Side Mods</label><input id="startup-optional-mods" class="form-control" placeholder="@optional1;@optional2;" /></div>
+            <div class="col-md-6"><label class="form-label">Extra Ports</label><input id="startup-extra-ports" class="form-control" placeholder="2303,2304,2305,2306" /></div>
+            <div class="col-md-3"><label class="form-label">Headless Clients</label><input id="startup-headless" class="form-control" type="number" min="0" max="5" /></div>
+            <div class="col-md-3"><label class="form-label">SteamCMD Flags</label><input id="startup-steam-flags" class="form-control" /></div>
+            <div class="col-12 d-flex flex-wrap gap-3">
+              <label class="form-check form-switch"><input id="startup-auto-update" class="form-check-input" type="checkbox" /> <span class="form-check-label">Automatic Updates</span></label>
+              <label class="form-check form-switch"><input id="startup-cdlc" class="form-check-input" type="checkbox" /> <span class="form-check-label">Download Creator DLCs</span></label>
+              <label class="form-check form-switch"><input id="startup-lowercase" class="form-check-input" type="checkbox" /> <span class="form-check-label">Repair Lowercase Mods</span></label>
+              <label class="form-check form-switch"><input id="startup-validate" class="form-check-input" type="checkbox" /> <span class="form-check-label">Validate Server Files</span></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="card-panel">
+          <div class="panel-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-sliders me-2"></i>Config Editor</span>
+            <button id="btn-save-config" class="btn btn-sm btn-success">
+              <i class="fa fa-floppy-disk me-1"></i>Save
+            </button>
+          </div>
+          <ul class="nav nav-tabs mt-3" id="config-tabs">
+            <li class="nav-item"><a class="nav-link active" href="#" data-config="server.cfg">server.cfg</a></li>
+            <li class="nav-item"><a class="nav-link" href="#" data-config="basic.cfg">basic.cfg</a></li>
+          </ul>
+          <textarea id="config-editor" class="code-editor mt-3" spellcheck="false"></textarea>
+        </div>
+      </div>
+
+      <!-- ── LOGS ───────────────────────────────────────────────── -->
+      <div id="view-logs" class="view d-none">
+        <div class="card-panel">
+          <div class="panel-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-terminal me-2"></i>Server Logs</span>
+            <div class="d-flex gap-2">
+              <label class="form-check form-switch mb-0 align-items-center d-flex gap-2">
+                <input class="form-check-input" type="checkbox" id="log-autoscroll" checked />
+                <span class="form-check-label small">Auto-scroll</span>
+              </label>
+              <button id="btn-clear-logs" class="btn btn-sm btn-outline-danger">
+                <i class="fa fa-trash"></i>
+              </button>
+            </div>
+          </div>
+          <pre id="log-output" class="log-box mt-2"></pre>
+        </div>
+      </div>
+
+      <div id="view-settings" class="view d-none">
+        <div class="row g-3">
+          <div class="col-lg-6">
+            <div class="card-panel">
+              <div class="panel-header"><i class="fa fa-user-gear me-2"></i>Panel Account</div>
+              <div class="row g-3 mt-1">
+                <div class="col-12">
+                  <label class="form-label">Username</label>
+                  <input id="settings-username" class="form-control" autocomplete="username" />
+                </div>
+                <div class="col-12">
+                  <label class="form-label">Current password</label>
+                  <input id="settings-current-password" class="form-control" type="password" autocomplete="current-password" />
+                </div>
+                <div class="col-12">
+                  <label class="form-label">New password</label>
+                  <input id="settings-new-password" class="form-control" type="password" autocomplete="new-password" />
+                </div>
+                <div class="col-12">
+                  <button id="btn-save-account" class="btn btn-primary">
+                    <i class="fa fa-floppy-disk me-1"></i>Save Account
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-6">
+            <div class="card-panel mb-3">
+              <div class="panel-header"><i class="fab fa-steam me-2"></i>Steam Login Link</div>
+              <div class="small text-muted mt-2" id="settings-steam-status">Checking...</div>
+              <a href="/auth/steam" id="btn-link-steam" class="btn btn-outline-primary mt-3">
+                <i class="fab fa-steam me-1"></i>Link Steam Session
+              </a>
+            </div>
+            <div class="card-panel">
+              <div class="panel-header"><i class="fa fa-rotate-left me-2"></i>SteamCMD Factory Setup</div>
+              <div class="small text-muted mt-2">Clears SteamCMD login cache and runs SteamCMD once, leaving it ready for first login and Steam Guard verification.</div>
+              <button class="btn btn-outline-warning mt-3 btn-reset-steamcmd">
+                <i class="fa fa-broom me-1"></i>Reset SteamCMD
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<!-- SteamCMD Login Modal -->
+<div class="modal fade" id="steamcmd-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content modal-dark">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fab fa-steam me-2"></i>SteamCMD Login</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-md-5">
+            <label class="form-label">Steam username</label>
+            <input id="steamcmd-user" class="form-control" autocomplete="username" />
+          </div>
+          <div class="col-md-5">
+            <label class="form-label">Steam password</label>
+            <input id="steamcmd-pass" class="form-control" type="password" autocomplete="current-password" />
+          </div>
+          <div class="col-md-2 d-flex align-items-end">
+            <button id="btn-steamcmd-start" class="btn btn-primary w-100">
+              <i class="fa fa-play me-1"></i>Start
+            </button>
+          </div>
+        </div>
+
+        <div id="steamcmd-input-panel" class="steamcmd-input-panel d-none mt-3">
+          <label class="form-label">Steam Guard / SteamCMD input</label>
+          <div class="input-group">
+            <input id="steamcmd-code" class="form-control" autocomplete="one-time-code" />
+            <button id="btn-steamcmd-send" class="btn btn-success">
+              <i class="fa fa-paper-plane me-1"></i>Send
+            </button>
+          </div>
+        </div>
+
+        <div class="d-flex justify-content-between align-items-center mt-3">
+          <div class="small text-muted" id="steamcmd-modal-state">Idle</div>
+          <button id="btn-steamcmd-cancel" class="btn btn-sm btn-outline-danger">
+            <i class="fa fa-stop me-1"></i>Cancel
+          </button>
+        </div>
+        <pre id="steamcmd-log" class="log-box mt-2"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container" class="position-fixed bottom-0 end-0 p-3" style="z-index:9999"></div>
+
+<!-- Scripts -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/socket.io/client-dist/socket.io.min.js"></script>
+<script src="/config.js"></script>
+<script src="/static/js/app.js?v=20260709-steamcmd-reset"></script>
+</body>
+</html>
