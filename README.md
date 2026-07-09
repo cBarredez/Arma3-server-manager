@@ -37,7 +37,7 @@ El objetivo del proyecto es levantar una plataforma portable que pueda correr lo
 | Runtime | Podman Compose |
 | Steam | SteamCMD dentro del contenedor API |
 
-> La implementacion legacy Node/Docker no forma parte del flujo actual.
+> El flujo actual usa Podman, Containerfile, nginx, .NET/Kestrel y SQLite.
 
 ## Features
 
@@ -336,4 +336,3 @@ git add .
 git commit -m "Update project documentation"
 git push
 ```
-

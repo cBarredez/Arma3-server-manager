@@ -1,6 +1,6 @@
 # .NET/Kestrel + SQLite + Podman migration
 
-The current runtime is a separated frontend/backend stack using Podman, nginx, ASP.NET Core/Kestrel, and SQLite. The previous Node/Docker implementation has been moved to `legacy-node/` for reference while the .NET backend is tested end to end.
+The current runtime is a separated frontend/backend stack using Podman, nginx, ASP.NET Core/Kestrel, and SQLite. The older Node-based implementation has been removed from the active repository.
 
 ## Layout
 
