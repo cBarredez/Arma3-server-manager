@@ -7,6 +7,11 @@ services:
     container_name: arma3-api
     restart: unless-stopped
     mem_limit: ${SERVER_MEM_LIMIT:-14g}
+    # ── To enable LAN server browser, use host networking: ───────────────────
+    # Add to your .env:  API_NETWORK_MODE=host
+    # With host mode the "ports:" section below is ignored.
+    # The Nginx frontend must then use ARMA3_API_BACKEND=http://localhost:8081
+    # (or whatever internal port the api runs on) instead of "api:8080".
     environment:
       STEAM_USER: ${STEAM_USER:-}
       STEAM_PASS: ${STEAM_PASS:-}
@@ -53,6 +58,10 @@ services:
     environment:
       ARMA3_API_BASE: ""
       ARMA3_REST_ONLY: "true"
+      # Backend address for Nginx reverse proxy.
+      # Default (bridge mode): api:8080  — uses compose container DNS.
+      # Host networking mode : 10.89.0.1:8081  — set via podman-compose.host.yml.
+      ARMA3_API_BACKEND: ${ARMA3_API_BACKEND:-api:8080}
     ports:
       - "${WEB_PORT:-8080}:8080/tcp"
 

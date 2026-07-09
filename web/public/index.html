@@ -190,6 +190,15 @@
                 <div class="info-row"><span>Status</span><span id="info-status" class="badge bg-danger">Offline</span></div>
                 <div class="info-row"><span>PID</span><span id="info-pid">—</span></div>
                 <div class="info-row"><span>Game Port</span><span id="info-port">—</span></div>
+                <div class="info-row info-row-stack">
+                  <span>Join Address</span>
+                  <div class="join-address">
+                    <code id="info-join-address">—</code>
+                    <button id="btn-copy-join-address" class="btn btn-sm btn-outline-secondary btn-icon" title="Copy join address">
+                      <i class="fa fa-copy"></i>
+                    </button>
+                  </div>
+                </div>
                 <div class="info-row"><span>Active Mods</span><span id="info-mods">—</span></div>
               </div>
               <hr class="divider" />
@@ -269,6 +278,7 @@
                 <button id="btn-load-preset" class="btn btn-secondary mt-2 w-100">
                   <i class="fa fa-upload me-1"></i>Load Preset
                 </button>
+                <div id="saved-preset-files" class="saved-preset-files mt-3"></div>
               </div>
             </div>
           </div>
@@ -367,7 +377,7 @@
           </div>
           <div class="row g-3 mt-1">
             <div class="col-md-4"><label class="form-label">Server Binary</label><select id="startup-binary" class="form-select"><option value="arma3server_x64">arma3server_x64</option><option value="arma3server">arma3server</option></select></div>
-            <div class="col-md-4"><label class="form-label">Bind IP</label><input id="startup-ip" class="form-control" placeholder="0.0.0.0" /></div>
+            <div class="col-md-4"><label class="form-label">Bind IP <span class="text-muted small" title="Leave as 0.0.0.0 to bind to all interfaces (recommended). Set your actual public IP only if needed for specific routing.">ⓘ</span></label><input id="startup-ip" class="form-control" placeholder="0.0.0.0 (recommended)" /></div>
             <div class="col-md-4"><label class="form-label">Game Port</label><input id="startup-port" class="form-control" type="number" min="1" max="65535" /></div>
             <div class="col-md-6"><label class="form-label">Profiles Directory</label><input id="startup-profiles" class="form-control" /></div>
             <div class="col-md-3"><label class="form-label">Max Players</label><input id="startup-max-players" class="form-control" type="number" min="1" max="256" /></div>
@@ -383,6 +393,7 @@
               <label class="form-check form-switch"><input id="startup-cdlc" class="form-check-input" type="checkbox" /> <span class="form-check-label">Download Creator DLCs</span></label>
               <label class="form-check form-switch"><input id="startup-lowercase" class="form-check-input" type="checkbox" /> <span class="form-check-label">Repair Lowercase Mods</span></label>
               <label class="form-check form-switch"><input id="startup-validate" class="form-check-input" type="checkbox" /> <span class="form-check-label">Validate Server Files</span></label>
+              <label class="form-check form-switch"><input id="startup-disable-battleye" class="form-check-input" type="checkbox" /> <span class="form-check-label">Disable BattlEye</span></label>
             </div>
           </div>
         </div>
@@ -525,6 +536,6 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/socket.io/client-dist/socket.io.min.js"></script>
 <script src="/config.js"></script>
-<script src="/static/js/app.js?v=20260709-file-drop"></script>
+<script src="/static/js/app.js?v=20260709-preset-files"></script>
 </body>
 </html>

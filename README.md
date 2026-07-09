@@ -138,6 +138,16 @@ python manage.py delete --yes
 python manage.py reset-volumes --yes
 ```
 
+Para usar un archivo de entorno especifico:
+
+```powershell
+python manage.py --env-file .env.lan rebuild
+python manage.py --env-file .env.test start
+python manage.py --env-file .env.local status
+```
+
+Si no pasas `--env-file`, Podman Compose usa `.env` automaticamente.
+
 | Comando | Accion |
 |---|---|
 | `start` | Levanta contenedores existentes |
@@ -281,6 +291,12 @@ Despues de cambiar `.env`, reconstruye:
 python manage.py rebuild
 ```
 
+Con otro archivo de entorno:
+
+```powershell
+python manage.py --env-file .env.lan rebuild
+```
+
 ## Estructura del Proyecto
 
 ```text
@@ -336,3 +352,5 @@ git add .
 git commit -m "Update project documentation"
 git push
 ```
+#   A r m a 3 - s e r v e r - m a n a g e r  
+ 

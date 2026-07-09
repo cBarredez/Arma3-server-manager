@@ -200,6 +200,9 @@ function loadView(name, pushState = true) {
   document.querySelectorAll('.view').forEach(v => v.classList.add('d-none'));
   document.querySelectorAll('[data-view]').forEach(l => l.classList.remove('active'));
 
+  // Close log stream when leaving the logs tab
+  if (state.view === 'logs' && name !== 'logs') stopLogStream();
+
   document.getElementById(`view-${name}`).classList.remove('d-none');
   document.querySelector(`[data-view="${name}"]`)?.classList.add('active');
   document.getElementById('page-title').textContent =
@@ -412,8 +415,10 @@ function initServerControls() {
     if (pid && d.pid) pid.textContent = `· PID ${d.pid}`;
     const infoPid  = document.getElementById('info-pid');
     const infoPort = document.getElementById('info-port');
+    const joinAddress = document.getElementById('info-join-address');
     if (infoPid)  infoPid.textContent  = d.pid  || '—';
     if (infoPort) infoPort.textContent = d.port || '—';
+    if (joinAddress) joinAddress.textContent = getJoinAddress(d);
   }).catch(() => {});
 }
 
@@ -423,6 +428,17 @@ function initServerControls() {
 function initDashboard() {
   // Fetch initial metrics
   GET('/api/metrics').then(renderMetrics).catch(() => {});
+
+  document.getElementById('btn-copy-join-address').onclick = async () => {
+    const address = document.getElementById('info-join-address').textContent.trim();
+    if (!address || address === '—') return;
+    try {
+      await navigator.clipboard.writeText(address);
+      toast('Join address copied');
+    } catch {
+      toast('Could not copy join address', 'warning');
+    }
+  };
 
   // Active mods count
   GET('/api/mods').then(mods => {
@@ -438,6 +454,12 @@ function initDashboard() {
       toast('Server installation started…', 'success');
     } catch (e) { handleSteamLoginRequired(e); }
   });
+}
+
+function getJoinAddress(status) {
+  const port = status?.port || '2302';
+  const host = status?.joinHost || window.location.hostname || 'localhost';
+  return `${host}:${port}`;
 }
 
 function renderMetrics(d) {
@@ -520,6 +542,7 @@ async function loadMods() {
   const container = document.getElementById('mod-list-container');
   initSteamCmdControls();
   loadModlists();
+  loadPresetFiles();
   container.innerHTML = '<div class="text-muted text-center py-4"><i class="fa fa-spinner fa-spin me-2"></i>Loading…</div>';
 
   // Check Steam credential status and show warning if anonymous
@@ -557,11 +580,62 @@ async function loadMods() {
       const res = await fetch(apiUrl('/api/mods/preset'), { method: 'POST', body: form, credentials: API_BASE ? 'include' : 'same-origin' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      showPresetPreview(data.mods);
+      showPresetPreview(data.mods, data.savedPath);
+      loadPresetFiles();
     } catch (e) { toast(e.message, 'error'); }
   };
 
   document.getElementById('btn-refresh-mods').onclick = () => loadMods();
+}
+
+async function loadPresetFiles() {
+  const container = document.getElementById('saved-preset-files');
+  if (!container) return;
+  try {
+    const files = await GET('/api/mods/preset-files');
+    if (!files.length) {
+      container.innerHTML = '<div class="text-muted small">No saved preset HTML files.</div>';
+      return;
+    }
+    container.innerHTML = files.map(file => `
+      <div class="saved-preset-file">
+        <div class="saved-preset-file-name">
+          <strong>${escHtml(file.name)}</strong>
+          <span class="text-muted small">${fmtBytes(file.size)}</span>
+        </div>
+        <div class="d-flex gap-1">
+          <button class="btn btn-sm btn-outline-primary" data-load-preset-file="${escAttr(file.path)}" title="Load saved preset">
+            <i class="fa fa-folder-open"></i>
+          </button>
+          <button class="btn btn-sm btn-outline-danger" data-delete-preset-file="${escAttr(file.path)}" title="Delete saved preset file">
+            <i class="fa fa-trash"></i>
+          </button>
+        </div>
+      </div>`).join('');
+
+    container.querySelectorAll('[data-load-preset-file]').forEach(btn => {
+      btn.onclick = async () => {
+        try {
+          const data = await POST('/api/mods/preset-files/load', { path: btn.dataset.loadPresetFile });
+          showPresetPreview(data.mods, data.savedPath);
+          toast('Preset loaded');
+        } catch (e) { toast(e.message, 'error'); }
+      };
+    });
+
+    container.querySelectorAll('[data-delete-preset-file]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Delete this saved HTML preset file? Saved modlists stay in the panel.')) return;
+        try {
+          await DELETE(`/api/mods/preset-files?path=${encodeURIComponent(btn.dataset.deletePresetFile)}`);
+          toast('Preset file deleted');
+          loadPresetFiles();
+        } catch (e) { toast(e.message, 'error'); }
+      };
+    });
+  } catch (e) {
+    container.innerHTML = `<div class="text-danger small">${e.message}</div>`;
+  }
 }
 
 async function openSteamCmdModal(prefillUser) {
@@ -918,10 +992,12 @@ function renderModList(mods) {
   });
 }
 
-function showPresetPreview(mods) {
+function showPresetPreview(mods, savedPath = '') {
   state.presetMods = mods;
   const panel = document.getElementById('preset-preview');
   panel.classList.remove('d-none');
+  const presetName = document.getElementById('preset-name');
+  if (presetName) presetName.textContent = savedPath ? `(${savedPath.split('/').pop()})` : '';
   const nameInput = document.getElementById('preset-save-name');
   if (nameInput && !nameInput.value) nameInput.value = `Modlist ${new Date().toLocaleDateString()}`;
   const list = document.getElementById('preset-mod-list');
@@ -1074,6 +1150,7 @@ function renderFileList(items, currentPath) {
         ${size}
         <div class="fi-actions">
           ${!item.isDir ? `<button class="btn btn-sm btn-outline-secondary btn-icon" data-edit="${escAttr(item.path)}" title="Edit"><i class="fa fa-pen-to-square"></i></button>` : ''}
+          <button class="btn btn-sm btn-outline-secondary btn-icon" data-rename="${escAttr(item.path)}" data-name="${escAttr(item.name)}" title="Rename"><i class="fa fa-pencil"></i></button>
           <button class="btn btn-sm btn-outline-danger btn-icon" data-del="${escAttr(item.path)}" title="Delete"><i class="fa fa-trash"></i></button>
         </div>
       </div>`;
@@ -1089,6 +1166,21 @@ function renderFileList(items, currentPath) {
   // Edit file
   container.querySelectorAll('[data-edit]').forEach(btn => {
     btn.addEventListener('click', e => { e.stopPropagation(); openFileEditor(btn.dataset.edit); });
+  });
+
+  // Rename
+  container.querySelectorAll('[data-rename]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const oldName = btn.dataset.name;
+      const newName = window.prompt('Rename to:', oldName);
+      if (!newName || newName === oldName) return;
+      try {
+        await PUT('/api/files/rename', { path: btn.dataset.rename, newName });
+        toast('Renamed to ' + newName);
+        loadFiles(currentPath);
+      } catch (e2) { toast(e2.message, 'error'); }
+    });
   });
 
   // Delete
@@ -1209,26 +1301,32 @@ function fillStartupForm(s) {
   setChecked('startup-cdlc', s.downloadCreatorDlcs);
   setChecked('startup-lowercase', s.lowerCaseMods);
   setChecked('startup-validate', s.validateServerFiles);
+  setChecked('startup-disable-battleye', s.disableBattleEye);
 }
 
 function readStartupForm() {
+  const toInt  = (id, fallback = 0) => { const n = parseInt(getVal(id), 10); return isNaN(n) ? fallback : n; };
+  const toIntN = (id)               => { const n = parseInt(getVal(id), 10); return isNaN(n) ? null : n; };
   return {
     serverBinary       : getVal('startup-binary'),
     ip                 : getVal('startup-ip'),
-    port               : getVal('startup-port'),
+    port               : toInt('startup-port', 2302),
     profilesDir        : getVal('startup-profiles'),
-    maxPlayers         : getVal('startup-max-players'),
+    serverCfg          : '',   // empty → backend fills from detected paths
+    basicCfg           : '',
+    maxPlayers         : toIntN('startup-max-players'),
     serverPassword     : getVal('startup-password'),
     extraParams        : getVal('startup-extra'),
     serverMods         : getVal('startup-server-mods'),
     optionalClientMods : getVal('startup-optional-mods'),
-    extraPorts         : getVal('startup-extra-ports').split(',').map(s => s.trim()).filter(Boolean),
-    headlessClients    : getVal('startup-headless'),
+    extraPorts         : getVal('startup-extra-ports').split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0),
+    headlessClients    : toInt('startup-headless', 0),
     steamCmdFlags      : getVal('startup-steam-flags'),
     automaticUpdates   : getChecked('startup-auto-update'),
     downloadCreatorDlcs: getChecked('startup-cdlc'),
     lowerCaseMods      : getChecked('startup-lowercase'),
     validateServerFiles: getChecked('startup-validate'),
+    disableBattleEye   : getChecked('startup-disable-battleye'),
   };
 }
 
@@ -1237,22 +1335,75 @@ function getVal(id) { return document.getElementById(id)?.value ?? ''; }
 function setChecked(id, value) { const el = document.getElementById(id); if (el) el.checked = !!value; }
 function getChecked(id) { return !!document.getElementById(id)?.checked; }
 
+// ─── log SSE state ────────────────────────────────────────────────────────────
+let logEventSource = null;
+let logIndex = 0;
+
+function stopLogStream() {
+  if (logEventSource) { logEventSource.close(); logEventSource = null; }
+}
+
 async function loadLogs() {
+  stopLogStream();
   const out = document.getElementById('log-output');
-  try {
-    const entries = await GET('/api/logs?limit=300');
-    out.textContent = entries.map(e => formatLogEntry(e)).join('');
-    if (document.getElementById('log-autoscroll').checked) out.scrollTop = out.scrollHeight;
-  } catch (e) { out.textContent = 'Error loading logs: ' + e.message; }
+  out.textContent = '';
+  logIndex = 0;
 
   document.getElementById('btn-clear-logs').onclick = () => { out.textContent = ''; };
+
+  // Load historical logs first
+  try {
+    const entries = await GET('/api/logs?limit=300');
+    if (entries.length) {
+      out.textContent = entries.map(e => formatLogEntry(e)).join('');
+      logIndex = entries.length;
+    }
+  } catch (e) { out.textContent = 'Error loading logs: ' + e.message; }
+
+  if (document.getElementById('log-autoscroll')?.checked) out.scrollTop = out.scrollHeight;
+
+  // Open SSE stream for new entries
+  // Open SSE stream for new entries (SSE is plain HTTP, works everywhere)
+  startLogStream(out);
+}
+
+function startLogStream(out) {
+  const url = apiUrl(`/api/logs/stream?since=${logIndex}`);
+  logEventSource = new EventSource(url, { withCredentials: true });
+
+  logEventSource.onmessage = e => {
+    try {
+      const entry = JSON.parse(e.data);
+      logIndex++;
+      appendLogLine(out, entry);
+    } catch { /* ignore malformed */ }
+  };
+
+  logEventSource.addEventListener('status', e => {
+    try {
+      const { running, pid } = JSON.parse(e.data);
+      updateServerStatus(running);
+      if (pid) {
+        const el = document.getElementById('dash-pid-text');
+        if (el) el.textContent = `· PID ${pid}`;
+      }
+    } catch { /* ignore */ }
+  });
+
+  logEventSource.onerror = () => {
+    // EventSource will auto-reconnect; nothing to do
+  };
+}
+
+function appendLogLine(out, entry) {
+  out.textContent += formatLogEntry(entry);
+  if (document.getElementById('log-autoscroll')?.checked) out.scrollTop = out.scrollHeight;
 }
 
 function appendLog(entry) {
   if (state.view !== 'logs') return;
   const out = document.getElementById('log-output');
-  out.textContent += formatLogEntry(entry);
-  if (document.getElementById('log-autoscroll').checked) out.scrollTop = out.scrollHeight;
+  appendLogLine(out, entry);
 }
 
 function formatLogEntry(e) {

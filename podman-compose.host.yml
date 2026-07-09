@@ -1,0 +1,32 @@
+# podman-compose.host.yml
+# ──────────────────────────────────────────────────────────────────────────────
+# Host-networking overlay for the Arma 3 Manager.
+# Use this when you need the Arma 3 server to appear in the LAN server browser
+# or when direct-connect from the same PC doesn't work through bridge NAT.
+#
+# Activate by adding to your .env:
+#   API_NETWORK_MODE=host
+#   API_PORT=8081
+#   ARMA3_API_BACKEND=10.89.0.1:8081
+#
+# Then rebuild: python manage.py rebuild
+#
+# What this does:
+#   • Runs the API/game-server container directly on the HOST network.
+#     The Arma 3 server binds to 0.0.0.0 on the host → it reports the real
+#     LAN IP to Steam → visible in LAN server browser.
+#   • Moves the API web port to 8081 to avoid conflicting with Nginx on 8080.
+#   • Tells Nginx to proxy /api/ to 10.89.0.1:8081 (the Podman bridge gateway
+#     which is the host itself as seen from the frontend container).
+# ──────────────────────────────────────────────────────────────────────────────
+services:
+  api:
+    network_mode: host
+    environment:
+      WEB_PORT: ${API_PORT:-8081}
+    ports: []   # Ignored with host networking; server uses host ports directly
+
+  frontend:
+    environment:
+      # Route Nginx → host gateway (Podman default: 10.89.0.1) port 8081
+      ARMA3_API_BACKEND: ${ARMA3_API_BACKEND:-10.89.0.1:8081}

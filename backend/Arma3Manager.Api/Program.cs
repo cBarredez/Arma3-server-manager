@@ -139,7 +139,6 @@ api.MapGet("/startup", async () =>
 
 api.MapPut("/startup", async (StartupSettings settings, RuntimeState runtime) =>
 {
-    if (runtime.IsRunning) return Results.Json(new { error = "Stop the game server before changing startup settings" }, statusCode: 400);
     settings = settings.Normalized(paths, cfg);
     await store.SaveStartupAsync(settings);
     await ServerCfgWriter.ApplyAsync(settings);
@@ -149,7 +148,8 @@ api.MapPut("/startup", async (StartupSettings settings, RuntimeState runtime) =>
 api.MapGet("/server/status", async (RuntimeState runtime) =>
 {
     var startup = await store.GetStartupAsync(paths, cfg);
-    return Results.Json(new { running = runtime.IsRunning, pid = runtime.ProcessId, port = startup.Port });
+    var joinHost = Uri.TryCreate(cfg.BaseUrl, UriKind.Absolute, out var baseUri) ? baseUri.Host : "";
+    return Results.Json(new { running = runtime.IsRunning, pid = runtime.ProcessId, port = startup.Port, joinHost });
 });
 
 api.MapPost("/server/start", async (RuntimeState runtime) =>
@@ -160,8 +160,10 @@ api.MapPost("/server/start", async (RuntimeState runtime) =>
     if (Environment.GetEnvironmentVariable("MOCK_SERVER") != "true" && !File.Exists(bin))
         return Results.Json(new { error = "Server binary not found. Please install the server first." }, statusCode: 400);
     var mods = await store.GetActiveModsAsync();
+    var lowercased = ModFileRepair.MakeLowercase(mods);
+    if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
     runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
-    return Results.Json(new { ok = true, pid = runtime.ProcessId });
+    return Results.Json(new { ok = true, pid = runtime.ProcessId, lowercased });
 });
 
 api.MapPost("/server/stop", (RuntimeState runtime) =>
@@ -177,8 +179,10 @@ api.MapPost("/server/restart", async (RuntimeState runtime) =>
     await Task.Delay(1000);
     var startup = await store.GetStartupAsync(paths, cfg);
     var mods = await store.GetActiveModsAsync();
+    var lowercased = ModFileRepair.MakeLowercase(mods);
+    if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before restart");
     runtime.Start(Path.Combine(cfg.Arma3Dir, startup.ServerBinary), CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
-    return Results.Json(new { ok = true, pid = runtime.ProcessId });
+    return Results.Json(new { ok = true, pid = runtime.ProcessId, lowercased });
 });
 
 api.MapPost("/server/install", async (RuntimeState runtime) =>
@@ -232,9 +236,9 @@ api.MapPost("/mods/install", async (InstallModRequest req, RuntimeState runtime)
     var auth = await store.GetSteamAuthAsync();
     var user = ResolvedSteamUser(cfg, auth);
     if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
+    var presetMod = new PresetMod(req.Name ?? $"@{req.WorkshopId}", req.WorkshopId);
     var args = SteamArgs(cfg, auth, "+workshop_download_item", "107410", req.WorkshopId, "validate");
-    runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], $"mod:{req.WorkshopId}");
-    await store.UpsertModAsync(new Mod(Guid.NewGuid().ToString("n"), req.Name ?? $"@{req.WorkshopId}", Path.Combine(cfg.Arma3Dir, $"@{req.WorkshopId}"), true, req.WorkshopId));
+    runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], $"mod:{req.WorkshopId}", async _ => await FinalizeWorkshopModsAsync(cfg, store, [presetMod]));
     return Results.Json(new { ok = true, queued = 1 });
 });
 api.MapPost("/mods/install-batch", async (InstallBatchRequest req, RuntimeState runtime) =>
@@ -242,23 +246,43 @@ api.MapPost("/mods/install-batch", async (InstallBatchRequest req, RuntimeState 
     var auth = await store.GetSteamAuthAsync();
     var user = ResolvedSteamUser(cfg, auth);
     if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
-    var count = 0;
-    foreach (var mod in req.Mods)
+    var mods = req.Mods
+        .Where(m => Regex.IsMatch(m.WorkshopId ?? "", @"^\d+$"))
+        .GroupBy(m => m.WorkshopId)
+        .Select(g => g.First())
+        .ToList();
+    if (mods.Count == 0) return Results.Json(new { error = "No valid Workshop IDs" }, statusCode: 400);
+    var taskArgs = new List<string> { "+force_install_dir", cfg.Arma3Dir };
+    taskArgs.AddRange(SteamArgs(cfg, auth));
+    foreach (var mod in mods)
     {
-        var args = SteamArgs(cfg, auth, "+workshop_download_item", "107410", mod.WorkshopId, "validate");
-        runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], $"mod:{mod.WorkshopId}");
-        count++;
+        taskArgs.AddRange(["+workshop_download_item", "107410", mod.WorkshopId, "validate"]);
     }
-    return Results.Json(new { ok = true, queued = count });
+    taskArgs.Add("+quit");
+    runtime.RunTask(paths.SteamCmd, taskArgs, $"mods:batch:{mods.Count}", async _ => await FinalizeWorkshopModsAsync(cfg, store, mods));
+    return Results.Json(new { ok = true, queued = mods.Count });
 });
 api.MapPost("/mods/preset", async (HttpRequest request) =>
 {
     var file = request.Form.Files["preset"];
     if (file is null) return Results.Json(new { error = "preset file required" }, statusCode: 400);
-    await using var stream = file.OpenReadStream();
-    using var reader = new StreamReader(stream);
-    var html = await reader.ReadToEndAsync();
-    return Results.Json(new { mods = PresetParser.Parse(html) });
+    var savedPath = await PresetFiles.SaveAsync(cfg, file);
+    var html = await File.ReadAllTextAsync(savedPath);
+    return Results.Json(new { mods = PresetParser.Parse(html), savedPath = PathGuard.Relative(cfg.Arma3Dir, savedPath) });
+});
+
+api.MapGet("/mods/preset-files", () => Results.Json(PresetFiles.List(cfg)));
+api.MapPost("/mods/preset-files/load", async (PresetFileLoadRequest req) =>
+{
+    var file = PresetFiles.Resolve(cfg, req.Path);
+    var html = await File.ReadAllTextAsync(file);
+    return Results.Json(new { mods = PresetParser.Parse(html), savedPath = PathGuard.Relative(cfg.Arma3Dir, file) });
+});
+api.MapDelete("/mods/preset-files", (string path) =>
+{
+    var file = PresetFiles.Resolve(cfg, path);
+    File.Delete(file);
+    return Results.Json(new { ok = true });
 });
 
 api.MapGet("/modlists", async () => Results.Json(await store.GetModlistsAsync()));
@@ -322,6 +346,27 @@ api.MapDelete("/files", async (string path) =>
     return Results.Json(new { ok = true, removedMods });
 });
 
+api.MapPut("/files/rename", async (FileRenameRequest req) =>
+{
+    var source = PathGuard.Resolve(cfg.Arma3Dir, req.Path);
+    var newName = Path.GetFileName(req.NewName?.Trim() ?? "");
+    if (string.IsNullOrWhiteSpace(newName) || newName.Contains('/') || newName.Contains('\\') || newName == "." || newName == "..")
+        return Results.Json(new { error = "Invalid name" }, statusCode: 400);
+    if (ProtectedFiles.IsProtected(PathGuard.Relative(cfg.Arma3Dir, source)))
+        return Results.Json(new { error = "Protected file" }, statusCode: 403);
+    var parent = Path.GetDirectoryName(source) ?? cfg.Arma3Dir;
+    var dest = Path.GetFullPath(Path.Combine(parent, newName));
+    if (!dest.StartsWith(Path.GetFullPath(cfg.Arma3Dir), StringComparison.OrdinalIgnoreCase))
+        return Results.Json(new { error = "Access denied" }, statusCode: 403);
+    if (Path.Exists(dest) && !string.Equals(source, dest, StringComparison.OrdinalIgnoreCase))
+        return Results.Json(new { error = "A file or folder with that name already exists" }, statusCode: 409);
+    if (Directory.Exists(source)) Directory.Move(source, dest);
+    else File.Move(source, dest);
+    var relNew = PathGuard.Relative(cfg.Arma3Dir, dest);
+    await store.RemoveModsForDeletedPathAsync(source);
+    return Results.Json(new { ok = true, newPath = relNew, newName });
+});
+
 api.MapGet("/config", async (string? file) =>
 {
     file ??= "server.cfg";
@@ -336,6 +381,65 @@ api.MapPut("/config", async (ConfigWriteRequest req) =>
     return Results.Json(new { ok = true });
 });
 api.MapGet("/logs", (RuntimeState runtime, int? limit) => Results.Json(runtime.Logs.TakeLast(Math.Min(limit ?? 300, 1000))));
+
+// Server-Sent Events — pushes new log lines and status changes in real time.
+// The client sends ?since=N where N is the last log index it received.
+// Reconnects are handled automatically by the browser EventSource API.
+api.MapGet("/logs/stream", async (HttpContext http, RuntimeState runtime, CancellationToken ct, int since = 0) =>
+{
+    http.Response.Headers.ContentType  = "text/event-stream";
+    http.Response.Headers.CacheControl = "no-cache";
+    http.Response.Headers.Connection   = "keep-alive";
+    // Disable response buffering so bytes reach the client immediately
+    http.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpResponseBodyFeature>()?.DisableBuffering();
+    await http.Response.Body.FlushAsync(ct);
+
+    var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+    var lastIndex = Math.Max(0, since);
+    var wasRunning  = runtime.IsRunning;
+
+    while (!ct.IsCancellationRequested)
+    {
+        try
+        {
+            var logs = runtime.Logs;
+
+            // Send any new log lines
+            if (logs.Count > lastIndex)
+            {
+                for (var i = lastIndex; i < logs.Count; i++)
+                {
+                    var line = $"data: {JsonSerializer.Serialize(logs[i], json)}\n\n";
+                    await http.Response.WriteAsync(line, ct);
+                }
+                await http.Response.Body.FlushAsync(ct);
+                lastIndex = logs.Count;
+            }
+
+            // Send status event when running state changes
+            var isRunning = runtime.IsRunning;
+            if (isRunning != wasRunning)
+            {
+                var evt = $"event: status\ndata: {JsonSerializer.Serialize(new { running = isRunning, pid = runtime.ProcessId }, json)}\n\n";
+                await http.Response.WriteAsync(evt, ct);
+                await http.Response.Body.FlushAsync(ct);
+                wasRunning = isRunning;
+            }
+
+            // Keep-alive ping every 15 s so proxies don't close the connection
+            if (lastIndex % 30 == 0)
+            {
+                await http.Response.WriteAsync(": ping\n\n", ct);
+                await http.Response.Body.FlushAsync(ct);
+            }
+
+            await Task.Delay(300, ct);
+        }
+        catch (OperationCanceledException) { break; }
+        catch { break; }
+    }
+});
+
 api.MapGet("/paths", () => Results.Json(paths));
 
 api.MapGet("/settings/account", async () =>
@@ -383,6 +487,26 @@ api.MapPost("/steamcmd/login/cancel", (SteamCmdSession steam) =>
     return Results.Json(new { ok = true });
 });
 
+// ── Serve frontend static files when running without a separate Nginx ────────
+// In production the Nginx container serves web/public/. In local WSL2 dev
+// mode (no Nginx) the API serves them directly so the panel loads.
+var webPublicDir = Path.Combine(AppContext.BaseDirectory, "web", "public");
+// Try relative to binary first, then relative to content root (dev mode)
+if (!Directory.Exists(webPublicDir))
+    webPublicDir = Path.Combine(builder.Environment.ContentRootPath, "web", "public");
+
+if (Directory.Exists(webPublicDir))
+{
+    var fp = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(webPublicDir);
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = fp, RequestPath = "/static" });
+    app.UseStaticFiles(new StaticFileOptions   { FileProvider = fp, RequestPath = "/static" });
+    // Also serve index.html at root and for any unmatched route
+    app.MapGet("/config.js", () =>
+        Results.Content("window.ARMA3_API_BASE = '';\nwindow.ARMA3_REST_ONLY = true;\n",
+                        "application/javascript"));
+    app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = fp });
+}
+
 app.Run();
 
 static bool IsAuthed(HttpContext http) => http.Session.GetString("authenticated") == "true";
@@ -422,6 +546,107 @@ static string[] SteamArgs(AppConfig cfg, SteamAuth? auth, params string[] tail)
     return args.ToArray();
 }
 
+static async Task<int> FinalizeWorkshopModsAsync(AppConfig cfg, SqliteStore store, IEnumerable<PresetMod> mods)
+{
+    var completed = 0;
+    foreach (var mod in mods
+        .Where(m => Regex.IsMatch(m.WorkshopId ?? "", @"^\d+$"))
+        .GroupBy(m => m.WorkshopId)
+        .Select(g => g.First()))
+    {
+        var source = Path.Combine(cfg.Arma3Dir, "steamapps", "workshop", "content", "107410", mod.WorkshopId);
+        if (!Directory.Exists(source)) continue;
+
+        var target = Path.Combine(cfg.Arma3Dir, $"@{mod.WorkshopId}");
+        if (!Directory.Exists(target))
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(target, source);
+            }
+            catch
+            {
+                CopyDirectory(source, target);
+            }
+        }
+
+        await store.UpsertModAsync(new Mod(Guid.NewGuid().ToString("n"), string.IsNullOrWhiteSpace(mod.Name) ? $"@{mod.WorkshopId}" : mod.Name, target, true, mod.WorkshopId));
+        completed++;
+    }
+    return completed;
+}
+
+static void CopyDirectory(string source, string target)
+{
+    Directory.CreateDirectory(target);
+    foreach (var file in Directory.EnumerateFiles(source))
+    {
+        File.Copy(file, Path.Combine(target, Path.GetFileName(file)), overwrite: true);
+    }
+    foreach (var dir in Directory.EnumerateDirectories(source))
+    {
+        CopyDirectory(dir, Path.Combine(target, Path.GetFileName(dir)));
+    }
+}
+
+static class ModFileRepair
+{
+    public static int MakeLowercase(IEnumerable<string> modPaths)
+    {
+        var changed = 0;
+        foreach (var modPath in modPaths.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            changed += LowercaseTree(modPath);
+        }
+        return changed;
+    }
+
+    static int LowercaseTree(string root)
+    {
+        var changed = 0;
+        if (Directory.Exists(root))
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(root).OrderByDescending(p => p.Count(c => c == Path.DirectorySeparatorChar)))
+            {
+                changed += LowercaseTree(entry);
+            }
+        }
+        changed += LowercaseEntry(root);
+        return changed;
+    }
+
+    static int LowercaseEntry(string path)
+    {
+        var parent = Path.GetDirectoryName(path);
+        var name = Path.GetFileName(path);
+        if (string.IsNullOrWhiteSpace(parent) || string.IsNullOrWhiteSpace(name)) return 0;
+
+        var lower = name.ToLowerInvariant();
+        if (name == lower) return 0;
+
+        var target = Path.Combine(parent, lower);
+        if (Path.Exists(target) && !string.Equals(Path.GetFullPath(path), Path.GetFullPath(target), StringComparison.Ordinal))
+            return 0;
+
+        var temp = Path.Combine(parent, $".a3mgr-lower-{Guid.NewGuid():N}");
+        if (Directory.Exists(path))
+        {
+            Directory.Move(path, temp);
+            Directory.Move(temp, target);
+        }
+        else if (File.Exists(path))
+        {
+            File.Move(path, temp);
+            File.Move(temp, target);
+        }
+        else
+        {
+            return 0;
+        }
+        return 1;
+    }
+}
+
 record AppConfig(int WebPort, string WebUsername, string WebPassword, string SessionSecret, string Arma3Dir, string SteamUser, string SteamPass, int ServerPort, string BaseUrl, HashSet<string> SteamOwnerIds, string? FrontendOrigin)
 {
     public static AppConfig FromEnvironment() => new(
@@ -445,7 +670,10 @@ record ServerPaths(string Arma3Dir, string Arma3Bin, string SteamCmd, string Con
         var steamInDir = Path.Combine(cfg.Arma3Dir, "steamcmd", "steamcmd.sh");
         var steamGlob = Path.Combine(Environment.GetEnvironmentVariable("STEAMCMD_DIR") ?? "/steamcmd", "steamcmd.sh");
         var steam = File.Exists(steamInDir) ? steamInDir : steamGlob;
-        var bin = File.Exists(Path.Combine(cfg.Arma3Dir, "arma3server")) ? Path.Combine(cfg.Arma3Dir, "arma3server") : Path.Combine(cfg.Arma3Dir, "arma3server_x64");
+        // Prefer 64-bit binary; fall back to 32-bit only if x64 is absent
+        var bin = File.Exists(Path.Combine(cfg.Arma3Dir, "arma3server_x64"))
+            ? Path.Combine(cfg.Arma3Dir, "arma3server_x64")
+            : Path.Combine(cfg.Arma3Dir, "arma3server");
         var config = Environment.GetEnvironmentVariable("CONFIG_DIR") ?? (File.Exists(Path.Combine(cfg.Arma3Dir, "config", "server.cfg")) ? Path.Combine(cfg.Arma3Dir, "config") : cfg.Arma3Dir);
         var profiles = Environment.GetEnvironmentVariable("PROFILES_DIR") ?? (Directory.Exists(Path.Combine(cfg.Arma3Dir, "serverprofile")) ? Path.Combine(cfg.Arma3Dir, "serverprofile") : Path.Combine(cfg.Arma3Dir, "profiles"));
         var missions = Environment.GetEnvironmentVariable("MISSIONS_DIR") ?? (Directory.Exists(Path.Combine(cfg.Arma3Dir, "mpmissions")) ? Path.Combine(cfg.Arma3Dir, "mpmissions") : Path.Combine(cfg.Arma3Dir, "missions"));
@@ -477,7 +705,7 @@ record ServerPaths(string Arma3Dir, string Arma3Bin, string SteamCmd, string Con
     }
 }
 
-record StartupSettings(string ServerBinary, string Ip, int Port, string ProfilesDir, string ServerCfg, string BasicCfg, string ExtraParams, int? MaxPlayers, string ServerPassword, bool AutomaticUpdates, bool DownloadCreatorDlcs, bool LowerCaseMods, bool ValidateServerFiles, string ServerMods, string OptionalClientMods, int[] ExtraPorts, int HeadlessClients, string SteamCmdFlags)
+record StartupSettings(string ServerBinary, string Ip, int Port, string ProfilesDir, string ServerCfg, string BasicCfg, string ExtraParams, int? MaxPlayers, string ServerPassword, bool AutomaticUpdates, bool DownloadCreatorDlcs, bool LowerCaseMods, bool ValidateServerFiles, bool DisableBattleEye, string ServerMods, string OptionalClientMods, int[] ExtraPorts, int HeadlessClients, string SteamCmdFlags)
 {
     public StartupSettings Normalized(ServerPaths paths, AppConfig cfg) => this with
     {
@@ -491,7 +719,7 @@ record StartupSettings(string ServerBinary, string Ip, int Port, string Profiles
         HeadlessClients = Math.Clamp(HeadlessClients, 0, 5)
     };
 
-    public static StartupSettings Default(ServerPaths paths, AppConfig cfg) => new(Path.GetFileName(paths.Arma3Bin), "0.0.0.0", cfg.ServerPort, paths.ProfilesDir, Path.Combine(paths.ConfigDir, "server.cfg"), Path.Combine(paths.ConfigDir, "basic.cfg"), "-autoInit -preload -limitFPS=120 -bandwidthAlg=2 -maxFileCacheSize -noSound", null, "", false, false, false, false, "", "", [], 0, "");
+    public static StartupSettings Default(ServerPaths paths, AppConfig cfg) => new(Path.GetFileName(paths.Arma3Bin), "0.0.0.0", cfg.ServerPort, paths.ProfilesDir, Path.Combine(paths.ConfigDir, "server.cfg"), Path.Combine(paths.ConfigDir, "basic.cfg"), "-autoInit -preload -limitFPS=120 -bandwidthAlg=2 -maxFileCacheSize -noSound", null, "", false, false, false, false, false, "", "", [], 0, "");
 }
 
 record Mod(string Id, string Name, string Path, bool Active, string? WorkshopId);
@@ -501,11 +729,13 @@ record Modlist(string Id, string Name, List<PresetMod> Mods, DateTimeOffset Crea
 record PresetMod(string Name, string WorkshopId);
 record LogEntry(string Type, string Data, DateTimeOffset Ts);
 record FileItem(string Name, string Path, bool IsDir, long Size, DateTime Modified);
+record SavedPresetFile(string Name, string Path, long Size, DateTime Modified);
 record LoginRequest(string Username, string Password);
 record ModUpdate(bool Active);
 record InstallModRequest(string WorkshopId, string? Name);
 record InstallBatchRequest(List<PresetMod> Mods);
 record ModlistSaveRequest(string Name, List<PresetMod> Mods, bool Activate);
+record PresetFileLoadRequest(string Path);
 
 static class PasswordHasher
 {
@@ -570,6 +800,7 @@ static class MetricsReader
     }
 }
 record FileWriteRequest(string Path, string Content);
+record FileRenameRequest(string Path, string NewName);
 record ConfigWriteRequest(string File, string Content);
 record SteamLoginRequest(string Username, string Password);
 record SteamInputRequest(string Input);
@@ -789,6 +1020,7 @@ class RuntimeState
 {
     Process? proc;
     readonly List<LogEntry> logs = [];
+    readonly SemaphoreSlim taskGate = new(1, 1);
     public IReadOnlyList<LogEntry> Logs => logs;
     public bool IsRunning => proc is { HasExited: false };
     public int? ProcessId => IsRunning ? proc!.Id : null;
@@ -803,10 +1035,29 @@ class RuntimeState
         if (proc is { HasExited: false }) proc.Kill(entireProcessTree: true);
         Push("system", "Server stopped");
     }
-    public void RunTask(string file, IEnumerable<string> args, string kind)
+    public void RunTask(string file, IEnumerable<string> args, string kind, Func<int, Task>? onExit = null)
     {
-        var p = StartProcess(file, args, Directory.GetCurrentDirectory());
-        Push("system", $"Task {kind} started PID {p.Id}");
+        var capturedArgs = args.ToArray();
+        _ = Task.Run(async () =>
+        {
+            await taskGate.WaitAsync();
+            try
+            {
+                using var p = StartProcess(file, capturedArgs, Directory.GetCurrentDirectory());
+                Push("system", $"Task {kind} started PID {p.Id}");
+                await p.WaitForExitAsync();
+                Push("system", $"Task {kind} exited with code {p.ExitCode}");
+                if (onExit is not null) await onExit(p.ExitCode);
+            }
+            catch (Exception ex)
+            {
+                Push("stderr", $"Task {kind} failed: {ex.Message}");
+            }
+            finally
+            {
+                taskGate.Release();
+            }
+        });
     }
     Process StartProcess(string file, IEnumerable<string> args, string cwd)
     {
@@ -817,7 +1068,7 @@ class RuntimeState
         p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
         return p;
     }
-    void Push(string type, string data)
+    public void Push(string type, string data)
     {
         logs.Add(new(type, data, DateTimeOffset.UtcNow));
         if (logs.Count > 1000) logs.RemoveAt(0);
@@ -924,7 +1175,11 @@ static class CommandBuilder
     public static string Build(ServerPaths paths, StartupSettings s) => "./" + s.ServerBinary + " " + string.Join(' ', Args(paths, s, []).Select(Quote));
     public static IEnumerable<string> Args(ServerPaths paths, StartupSettings s, IEnumerable<string> mods)
     {
-        yield return $"-ip={s.Ip}";
+        // Only set -ip= when binding to a specific interface (not 0.0.0.0).
+        // Omitting -ip= when binding-all is more reliable for Steam server browser registration.
+        var ip = (s.Ip ?? "").Trim();
+        if (!string.IsNullOrWhiteSpace(ip) && ip != "0.0.0.0")
+            yield return $"-ip={ip}";
         yield return $"-port={s.Port}";
         yield return $"-config={s.ServerCfg}";
         yield return $"-cfg={s.BasicCfg}";
@@ -933,6 +1188,7 @@ static class CommandBuilder
         var modList = mods.Select(m => Path.GetRelativePath(paths.Arma3Dir, m)).ToArray();
         if (modList.Length > 0) yield return $"-mod={string.Join(';', modList)}";
         if (!string.IsNullOrWhiteSpace(s.ServerMods)) yield return $"-serverMod={s.ServerMods}";
+        if (s.DisableBattleEye) yield return "-noBattlEye";
         foreach (var arg in SplitArgs(s.ExtraParams)) yield return arg;
     }
     static IEnumerable<string> SplitArgs(string value) => Regex.Matches(value ?? "", @"[^\s""]+|""([^""]*)""").Select(m => m.Value.Trim('"'));
@@ -951,6 +1207,54 @@ static class PathGuard
         return resolved;
     }
     public static string Relative(string root, string fullPath) => Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(fullPath)).Replace('\\', '/') is "." ? "" : Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(fullPath)).Replace('\\', '/');
+}
+
+static class PresetFiles
+{
+    public static string Root(AppConfig cfg) => Path.Combine(cfg.Arma3Dir, "presets", "modlists");
+
+    public static async Task<string> SaveAsync(AppConfig cfg, IFormFile file)
+    {
+        Directory.CreateDirectory(Root(cfg));
+        var name = SafeName(string.IsNullOrWhiteSpace(file.FileName) ? "preset.html" : file.FileName);
+        if (!name.EndsWith(".html", StringComparison.OrdinalIgnoreCase) && !name.EndsWith(".htm", StringComparison.OrdinalIgnoreCase))
+            name += ".html";
+        var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss");
+        var path = Path.Combine(Root(cfg), $"{stamp}-{name}");
+        await using var output = File.Create(path);
+        await file.CopyToAsync(output);
+        return path;
+    }
+
+    public static SavedPresetFile[] List(AppConfig cfg)
+    {
+        Directory.CreateDirectory(Root(cfg));
+        return Directory.EnumerateFiles(Root(cfg), "*.htm*")
+            .Select(path =>
+            {
+                var info = new FileInfo(path);
+                return new SavedPresetFile(info.Name, PathGuard.Relative(cfg.Arma3Dir, path), info.Length, info.LastWriteTimeUtc);
+            })
+            .OrderByDescending(f => f.Modified)
+            .ToArray();
+    }
+
+    public static string Resolve(AppConfig cfg, string path)
+    {
+        var file = PathGuard.Resolve(cfg.Arma3Dir, path);
+        var root = Path.GetFullPath(Root(cfg));
+        var full = Path.GetFullPath(file);
+        if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Access denied");
+        if (!File.Exists(full)) throw new FileNotFoundException("Preset file not found");
+        return full;
+    }
+
+    static string SafeName(string name)
+    {
+        var clean = Path.GetFileName(name);
+        foreach (var c in Path.GetInvalidFileNameChars()) clean = clean.Replace(c, '-');
+        return Regex.Replace(clean, @"\s+", "-");
+    }
 }
 
 static class ProtectedFiles
