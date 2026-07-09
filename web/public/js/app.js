@@ -985,16 +985,61 @@ async function loadFiles(dir) {
 
   // File upload
   document.getElementById('file-upload-input').onchange = async function () {
-    const form = new FormData();
-    for (const file of this.files) form.append('files', file);
-    try {
-      await fetch(apiUrl(`/api/files/upload?dir=${encodeURIComponent(state.currentFilePath)}`),
-        { method: 'POST', body: form, credentials: API_BASE ? 'include' : 'same-origin' });
-      toast('Files uploaded');
-      loadFiles(state.currentFilePath);
-    } catch (e) { toast(e.message, 'error'); }
+    await uploadFiles(this.files);
     this.value = '';
   };
+  initFileDropZone();
+}
+
+async function uploadFiles(files) {
+  const fileList = [...files].filter(file => file && file.name);
+  if (!fileList.length) return;
+
+  const form = new FormData();
+  fileList.forEach(file => form.append('files', file));
+
+  try {
+    const res = await fetch(apiUrl(`/api/files/upload?dir=${encodeURIComponent(state.currentFilePath || '')}`), {
+      method: 'POST',
+      body: form,
+      credentials: API_BASE ? 'include' : 'same-origin',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    toast(fileList.length === 1 ? `Uploaded ${fileList[0].name}` : `Uploaded ${fileList.length} files`);
+    loadFiles(state.currentFilePath);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function initFileDropZone() {
+  const zone = document.getElementById('file-drop-zone');
+  if (!zone || zone.dataset.ready === 'true') return;
+  zone.dataset.ready = 'true';
+
+  ['dragenter', 'dragover'].forEach(eventName => {
+    zone.addEventListener(eventName, e => {
+      e.preventDefault();
+      e.stopPropagation();
+      zone.classList.add('drag-over');
+    });
+  });
+
+  ['dragleave', 'dragend'].forEach(eventName => {
+    zone.addEventListener(eventName, e => {
+      e.preventDefault();
+      e.stopPropagation();
+      zone.classList.remove('drag-over');
+    });
+  });
+
+  zone.addEventListener('drop', async e => {
+    e.preventDefault();
+    e.stopPropagation();
+    zone.classList.remove('drag-over');
+    await uploadFiles(e.dataTransfer?.files || []);
+  });
 }
 
 function renderBreadcrumb(relPath, rootName = 'Arma 3 Server') {

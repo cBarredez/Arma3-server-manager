@@ -435,6 +435,31 @@ html, body {
 .breadcrumb-item a { color: var(--accent); text-decoration: none; font-size: .85rem; }
 .breadcrumb-item.active { color: var(--text-muted); font-size: .85rem; }
 
+.file-drop-zone {
+  align-items: center;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  display: flex;
+  gap: .65rem;
+  justify-content: center;
+  min-height: 64px;
+  padding: .85rem;
+  text-align: center;
+  transition: background .15s, border-color .15s, color .15s;
+}
+
+.file-drop-zone i {
+  color: var(--accent);
+  font-size: 1.1rem;
+}
+
+.file-drop-zone.drag-over {
+  background: rgba(56, 139, 253, .1);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
 /* ─── Preset mod list ───────────────────────────────────────────────────── */
 .preset-item {
   display: flex;
