@@ -39,6 +39,15 @@ class Target:
         return f"{home}/.local/share/arma3-manager"
 
 
+_SSH_SOCKETS: dict[str, str] = {}
+
+
+def _ssh_opts(target: Target) -> list[str]:
+    if target.ssh not in _SSH_SOCKETS:
+        _SSH_SOCKETS[target.ssh] = f"/tmp/arma3-deploy-{target.server}.sock"
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPath={_SSH_SOCKETS[target.ssh]}", "-o", "ControlPersist=60s"]
+
+
 def run(args: list[str], *, check: bool = True, input_data: bytes | None = None) -> subprocess.CompletedProcess:
     print("+", shlex.join(args))
     return subprocess.run(args, cwd=ROOT, check=check, input=input_data)
@@ -50,11 +59,11 @@ def capture(args: list[str], *, check: bool = True) -> str:
 
 
 def remote(target: Target, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    return run(["ssh", target.ssh, shlex.join(args)], check=check)
+    return run(["ssh"] + _ssh_opts(target) + [target.ssh, shlex.join(args)], check=check)
 
 
 def remote_capture(target: Target, args: list[str], *, check: bool = True) -> str:
-    return capture(["ssh", target.ssh, shlex.join(args)], check=check)
+    return capture(["ssh"] + _ssh_opts(target) + [target.ssh, shlex.join(args)], check=check)
 
 
 def load_target(environment: str) -> Target:
@@ -154,13 +163,13 @@ def upload_release(target: Target, release: str) -> str:
         stdout=subprocess.PIPE,
     )
     assert archive.stdout is not None
-    extract = subprocess.run(["ssh", target.ssh, f"tar -xzf - -C {shlex.quote(remote_dir)}"], stdin=archive.stdout)
+    extract = subprocess.run(["ssh"] + _ssh_opts(target) + [target.ssh, f"tar -xzf - -C {shlex.quote(remote_dir)}"], stdin=archive.stdout)
     archive.stdout.close()
     archive_code = archive.wait()
     if archive_code or extract.returncode:
         raise SystemExit("Project transfer failed")
     if SECRETS_FILE.exists():
-        run(["scp", str(SECRETS_FILE), f"{target.ssh}:{target.remote_root}/config/manager.secrets.toml"])
+        run(["scp"] + _ssh_opts(target) + [str(SECRETS_FILE), f"{target.ssh}:{target.remote_root}/config/manager.secrets.toml"])
         remote(target, ["chmod", "600", f"{target.remote_root}/config/manager.secrets.toml"])
     return remote_dir
 
