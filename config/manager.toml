@@ -1,9 +1,12 @@
 # Arma 3 Manager configuration. Secrets belong in manager.secrets.toml.
 
 [web]
+# Internal Kestrel port, reachable only from the Podman network.
 port = 8080
-public_port = 8080
-bind_ip = "127.0.0.1"
+# Public Nginx port. Both the web UI and /api/* are exposed here.
+public_port = 38080
+# Listen on every host interface so the panel is reachable over the network.
+bind_ip = "0.0.0.0"
 username = "admin"
 base_url = ""
 frontend_origin = ""
