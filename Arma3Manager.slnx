@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="backend/Arma3Manager.Api/Arma3Manager.Api.csproj" />
+  <Project Path="tests/Arma3Manager.Api.Tests/Arma3Manager.Api.Tests.csproj" />
+</Solution>
