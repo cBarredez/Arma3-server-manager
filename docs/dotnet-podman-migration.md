@@ -1,142 +1,50 @@
-# .NET/Kestrel + SQLite + Podman migration
+# Arquitectura .NET, Astro y Podman
 
-The current runtime is a separated frontend/backend stack using Podman, nginx, ASP.NET Core/Kestrel, and SQLite. The older Node-based implementation has been removed from the active repository.
+## Flujo de ejecución
 
-## Layout
+Nginx sirve el frontend estático producido por Astro y redirige `/api/*` y
+`/auth/*` a Kestrel. El backend inicia SteamCMD y el servidor dedicado como
+procesos hijos, mientras SQLite guarda únicamente metadatos del gestor.
 
-- `backend/Arma3Manager.Api`: REST API on ASP.NET Core/Kestrel targeting .NET 10.
-- `web/public`: static frontend assets.
-- `Containerfile.api`: builds/runs the .NET backend with SteamCMD and Arma 3 runtime dependencies.
-- `Containerfile.frontend`: serves the frontend through nginx.
-- `podman-compose.yml`: runs `api` and `frontend` as separate services.
+## Límites de responsabilidad
 
-## SQLite state
+- TOML contiene configuración necesaria antes de abrir SQLite.
+- SQLite contiene estado mutable generado desde la interfaz.
+- Los secretos se montan desde un archivo privado, nunca desde la imagen.
+- Los archivos de Arma 3 permanecen en un volumen Podman.
+- Astro y Vue no requieren un proceso Node en producción.
 
-The .NET backend stores manager state in:
+## Contenedores
 
-```text
-/arma3/manager.sqlite3
-```
+`Containerfile.api` utiliza una compilación multi-stage de .NET y una imagen
+runtime que contiene SteamCMD y dependencias Linux de Arma 3.
 
-The database is for manager metadata only:
+`Containerfile.frontend` compila Astro/Vue con Node y copia exclusivamente
+`dist/` a Nginx. Chart.js se descarga únicamente al abrir el Dashboard y
+Bootstrap JS se limita a Modal y Toast.
 
-- startup settings
-- SteamCMD username/session metadata
-- mods registry
-- modlists
-- active modlist setting
-- future task history
+## Red
 
-It does not store real server files, downloaded mods, missions, keys, or large logs.
+En modo bridge, Nginx resuelve `arma3-api:8080` dentro de `arma3-net` y
+Podman publica los puertos UDP 2302–2305.
 
-On first boot, the backend imports existing JSON files if present:
+En modo host, el API utiliza `manager.host.toml` y escucha en 8081 para no
+colisionar con el frontend público en 8080.
 
-- `/arma3/startup.json`
-- `/arma3/steamcmd-auth.json`
-
-The existing game/server files stay in the `/arma3` volume.
-
-## Run with Podman
-
-```bash
-podman compose -f podman-compose.yml up --build
-```
-
-Open:
+## Persistencia
 
 ```text
-http://localhost:8080
+arma3-server  -> /arma3
+steam-home    -> /home/arma3/Steam
+steam-config  -> /home/arma3/.steam
+aspnet-keys   -> /home/arma3/.aspnet
 ```
 
-The frontend container proxies these paths to the backend container:
+El despliegue reemplaza contenedores, no volúmenes. La base
+`/arma3/manager.sqlite3` se conserva junto a los archivos del servidor.
 
-- `/api/*`
-- `/auth/*`
+## Compatibilidad
 
-## Resource limits
-
-The API/game-server container has a compose memory cap controlled by:
-
-```env
-SERVER_MEM_LIMIT=14g
-```
-
-On Windows/WSL, the WSL VM memory limit is controlled by `%USERPROFILE%\.wslconfig`:
-
-```ini
-[wsl2]
-memory=14GB
-```
-
-The Podman WSL disk was resized with:
-
-```powershell
-wsl --shutdown
-wsl --manage podman-machine-default --resize 200GB
-```
-
-## Windows troubleshooting
-
-If PowerShell says `podman` is not recognized, Podman may be installed but not on `PATH`.
-
-Check the common user install path:
-
-```powershell
-& "$env:LOCALAPPDATA\Programs\Podman\podman.exe" --version
-```
-
-Add it to your user `PATH`, then open a new terminal:
-
-```powershell
-[Environment]::SetEnvironmentVariable(
-  "Path",
-  [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:LOCALAPPDATA\Programs\Podman",
-  "User"
-)
-```
-
-If `podman machine list` fails with `mkdir ...\.config: Cannot create a file when that file already exists`, inspect `~\.config`. Podman expects it to be a directory:
-
-```powershell
-$cfg = "$env:USERPROFILE\.config"
-Get-Item -Force $cfg | Format-List FullName,Mode,Length,Attributes
-```
-
-If it is a file, back it up and create the directory:
-
-```powershell
-Rename-Item -LiteralPath $cfg -NewName ".config.backup"
-New-Item -ItemType Directory -Path $cfg
-```
-
-Then initialize/start the Podman VM:
-
-```powershell
-podman machine init
-podman machine start
-podman machine list
-```
-
-## Local .NET development
-
-This project targets `.NET 10`. Install the .NET 10 SDK, then:
-
-```bash
-dotnet restore backend/Arma3Manager.Api/Arma3Manager.Api.csproj
-dotnet run --project backend/Arma3Manager.Api/Arma3Manager.Api.csproj
-```
-
-For separated local frontend/backend development, set:
-
-```js
-window.ARMA3_API_BASE = 'http://localhost:8080';
-window.ARMA3_REST_ONLY = true;
-```
-
-or use the nginx frontend container, which writes those values into `/config.js` at startup.
-
-## Current migration status
-
-The new backend covers the same REST surface used by the frontend and persists manager state to SQLite. The previous Socket.IO live updates are intentionally not carried over yet; the frontend now supports REST-only polling mode for the separated deployment.
-
-Recommended next step: replace REST-only polling with SignalR if live logs/progress updates become important in the .NET backend.
+Las rutas REST, métodos, nombres de funciones del cliente y estructuras JSON se
+mantuvieron durante la migración. El frontend utiliza polling REST para estado y
+Server-Sent Events para logs.
