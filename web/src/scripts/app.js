@@ -312,6 +312,7 @@ function initSocket() {
 // ─── Server status helpers ────────────────────────────────────────────────────
 function updateServerStatus(running, busy = false) {
   state.serverRunning = running;
+  window.dispatchEvent(new CustomEvent('arma3:status', { detail: { running, busy } }));
 
   // ── Topbar badge ──────────────────────────────────────────────────────────
   const topDot  = document.querySelector('#server-status-badge .status-dot');
@@ -496,9 +497,11 @@ function pushHistory(cpu, mem) {
   }
 }
 
-function initChart() {
+async function initChart() {
   const ctx = document.getElementById('chart-metrics');
   if (!ctx || state.chart) return;
+  const { default: Chart } = await import('chart.js/auto');
+  if (state.chart || !ctx.isConnected) return;
   state.chart = new Chart(ctx, {
     type: 'line',
     data: {

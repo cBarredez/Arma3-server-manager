@@ -6,7 +6,7 @@ printf 'window.ARMA3_API_BASE = "%s";\nwindow.ARMA3_REST_ONLY = %s;\n' \
 
 # Substitute the API backend address into the nginx template.
 # Default: api:8080  (bridge / compose DNS)
-# Host networking: set ARMA3_API_BACKEND=10.89.0.1:8081 in .env
+# Host networking supplies ARMA3_API_BACKEND from the Podman definition.
 BACKEND="${ARMA3_API_BACKEND:-api:8080}"
 sed "s|__ARMA3_API_BACKEND__|${BACKEND}|g" \
     /etc/nginx/conf.d/default.conf.template \
