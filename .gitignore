@@ -1,4 +1,6 @@
 # Local secrets
+config/manager.secrets.toml
+deploy.toml
 .env.local
 .env.private
 .env.public-test
@@ -14,6 +16,9 @@ volumes/
 # Node / frontend local dependencies
 node_modules/
 web/node_modules/
+web/dist/
+.astro/
+docs/generated/backend/html/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

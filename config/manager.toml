@@ -1,0 +1,31 @@
+# Arma 3 Manager configuration. Secrets belong in manager.secrets.toml.
+
+[web]
+port = 8080
+public_port = 8080
+bind_ip = "127.0.0.1"
+username = "admin"
+base_url = ""
+frontend_origin = ""
+public_join_host = ""
+
+[server]
+arma3_dir = "/arma3"
+steamcmd_dir = "/steamcmd"
+port = 2302
+query_port = 2303
+battleye_port = 2304
+von_port = 2305
+max_players = 40
+memory_limit = "14g"
+network_mode = "bridge"
+
+[steam]
+user = "anonymous"
+owner_ids = []
+creator_dlc_app_ids = []
+
+[runtime]
+timezone = "UTC"
+mock_server = false
+mock_steamcmd = false

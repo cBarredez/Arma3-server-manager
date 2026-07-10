@@ -1,9 +1,12 @@
 node_modules/
 web/node_modules/
 .env
+deploy.toml
+config/manager.secrets.toml
 *.log
 .DS_Store
 Thumbs.db
 __pycache__/
 bin/
 obj/
+web/dist/

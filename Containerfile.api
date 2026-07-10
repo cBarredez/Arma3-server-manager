@@ -8,10 +8,7 @@ RUN dotnet publish backend/Arma3Manager.Api/Arma3Manager.Api.csproj -c Release -
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV ARMA3_DIR=/arma3
 ENV STEAMCMD_DIR=/steamcmd
-ENV WEB_PORT=8080
-ENV ASPNETCORE_URLS=http://0.0.0.0:8080
 
 RUN dpkg --add-architecture i386 \
     && apt-get update \
@@ -47,6 +44,7 @@ RUN chown -R arma3:arma3 /defaults
 
 WORKDIR /app
 COPY --from=build /out/ ./
+COPY config/manager.toml /app/config/manager.toml
 RUN chown -R arma3:arma3 /app
 
 EXPOSE 8080/tcp
@@ -57,6 +55,9 @@ EXPOSE 2305/udp
 EXPOSE 2306/udp
 
 VOLUME ["/arma3", "/home/arma3/Steam", "/home/arma3/.steam", "/home/arma3/.aspnet"]
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -f http://127.0.0.1:8080/api/health || curl -f http://127.0.0.1:8081/api/health || exit 1
 
 USER arma3
 ENTRYPOINT ["/usr/bin/tini", "--"]
