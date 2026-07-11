@@ -62,9 +62,16 @@ function fmtBytes(b) {
 }
 
 function fmtPercent(value) {
+  if (value === null || value === undefined || value === '') return '—';
   const n = Number(value);
-  if (!Number.isFinite(n)) return '0%';
+  if (!Number.isFinite(n)) return '—';
   return n > 0 && n < 10 ? n.toFixed(1) + '%' : Math.round(n) + '%';
+}
+
+function metricNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function setText(id, value) {
@@ -240,7 +247,7 @@ function initSocket() {
         GET('/api/server/status').then(d => updateServerStatus(d.running)).catch(() => {});
         GET('/api/metrics').then(d => {
           renderMetrics(d);
-          pushHistory(Number(d.cpu?.load) || 0, Number(d.memory?.percent) || 0);
+          pushHistory(metricNumber(d.cpu?.load), metricNumber(d.memory?.percent));
         }).catch(() => {});
       }
     };
@@ -540,9 +547,10 @@ function getJoinAddress(status) {
 }
 
 function renderMetrics(d) {
-  setText('m-cpu', fmtPercent(d.cpu.load));
+  setText('m-cpu', fmtPercent(d.cpu?.load));
   renderUsageMetric('m-mem', 'm-mem-detail', d.memory);
-  document.getElementById('m-temp').textContent = d.temperature ? d.temperature + '°C' : '—';
+  const temperature = metricNumber(d.temperature);
+  setText('m-temp', temperature === null ? '—' : temperature + '°C');
   if (d.disk && d.disk.length) {
     const armaDisk = d.disk.find(dk => dk.mount === '/arma3') || d.disk.find(dk => dk.mount === '/') || d.disk[0];
     renderUsageMetric('m-disk', 'm-disk-detail', { ...armaDisk, total: armaDisk.size });
