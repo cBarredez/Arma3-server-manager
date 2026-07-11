@@ -142,29 +142,68 @@ public static class ApiEndpoints
             var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
             var lowercased = ModFileRepair.MakeLowercase(mods);
             if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
+            await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
             runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
             return Results.Json(new { ok = true, pid = runtime.ProcessId, lowercased });
         });
-        
-        api.MapPost("/server/stop", (RuntimeState runtime) =>
+
+        api.MapPost("/server/stop", async (RuntimeState runtime, BattlEyeRconClient rcon) =>
         {
             if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
             runtime.Stop();
+            await rcon.DisconnectAsync();
             return Results.Json(new { ok = true });
         });
-        
-        api.MapPost("/server/restart", async (RuntimeState runtime) =>
+
+        api.MapPost("/server/restart", async (RuntimeState runtime, BattlEyeRconClient rcon) =>
         {
             if (runtime.IsRunning) runtime.Stop();
+            await rcon.DisconnectAsync();
             await Task.Delay(1000);
             var startup = await store.GetStartupAsync(paths, cfg);
             var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
             var lowercased = ModFileRepair.MakeLowercase(mods);
             if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before restart");
+            await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
             runtime.Start(Path.Combine(cfg.Arma3Dir, startup.ServerBinary), CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
             return Results.Json(new { ok = true, pid = runtime.ProcessId, lowercased });
         });
-        
+
+        api.MapPost("/server/rcon/command", async (RconCommandRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
+        {
+            if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
+            try { return Results.Json(new { ok = true, response = await rcon.SendCommandAsync(req.Command) }); }
+            catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
+        });
+
+        api.MapPost("/server/rcon/say", async (RconSayRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
+        {
+            if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
+            try { return Results.Json(new { ok = true, response = await rcon.SendSayAsync(req.Message) }); }
+            catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
+        });
+
+        api.MapGet("/server/rcon/players", async (RuntimeState runtime, BattlEyeRconClient rcon) =>
+        {
+            if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
+            try { return Results.Json(await rcon.GetPlayersAsync()); }
+            catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
+        });
+
+        api.MapPost("/server/rcon/kick", async (RconKickRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
+        {
+            if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
+            try { return Results.Json(new { ok = true, response = await rcon.KickAsync(req.PlayerId, req.Reason) }); }
+            catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
+        });
+
+        api.MapPost("/server/rcon/ban", async (RconBanRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
+        {
+            if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
+            try { return Results.Json(new { ok = true, response = await rcon.BanAsync(req.PlayerId, req.Minutes, req.Reason) }); }
+            catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
+        });
+
         api.MapPost("/server/install", async (RuntimeState runtime) =>
         {
             var auth = await store.GetSteamAuthAsync();
