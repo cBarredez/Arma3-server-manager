@@ -340,10 +340,6 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
           <div class="panel-header d-flex justify-content-between align-items-center">
             <span><i class="fa fa-folder-open me-2"></i>File Manager</span>
             <div class="d-flex gap-2">
-              <div class="btn-group btn-group-sm" role="group" aria-label="File view">
-                <button type="button" id="btn-view-list" class="btn btn-outline-secondary" title="List view"><i class="fa fa-list"></i></button>
-                <button type="button" id="btn-view-table" class="btn btn-outline-secondary" title="Table view"><i class="fa fa-table"></i></button>
-              </div>
               <label class="btn btn-sm btn-outline-primary mb-0">
                 <i class="fa fa-upload me-1"></i>Upload
                 <input type="file" id="file-upload-input" class="d-none" multiple />
@@ -367,7 +363,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
               <i class="fa fa-floppy-disk me-1"></i>Save
             </button>
           </div>
-          <textarea id="file-editor" class="code-editor mt-2" spellcheck="false"></textarea>
+          <div id="file-editor" class="syntax-editor-host mt-2"></div>
         </div>
       </div>
 
@@ -423,7 +419,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
             <li class="nav-item"><a class="nav-link active" href="#" data-config="server.cfg">server.cfg</a></li>
             <li class="nav-item"><a class="nav-link" href="#" data-config="basic.cfg">basic.cfg</a></li>
           </ul>
-          <textarea id="config-editor" class="code-editor mt-3" spellcheck="false"></textarea>
+          <div id="config-editor" class="syntax-editor-host mt-3"></div>
         </div>
       </div>
 
@@ -431,7 +427,10 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
       <div id="view-logs" class="view d-none">
         <div class="card-panel">
           <div class="panel-header d-flex justify-content-between align-items-center">
-            <span><i class="fa fa-terminal me-2"></i>Server Logs</span>
+            <span class="d-flex align-items-center gap-2">
+              <span><i class="fa fa-terminal me-2"></i>Server Logs</span>
+              <span id="log-stream-status" class="badge text-bg-secondary">Connecting</span>
+            </span>
             <div class="d-flex gap-2">
               <label class="form-check form-switch mb-0 align-items-center d-flex gap-2">
                 <input class="form-check-input" type="checkbox" id="log-autoscroll" checked />

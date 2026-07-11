@@ -8,7 +8,7 @@ namespace Arma3Manager.Api.Infrastructure;
 /// <summary>Periodically scans the Arma3 volume and keeps the SQLite file index up to date, backing the File Manager and the tracked-disk-usage metric.</summary>
 public sealed class FileIndexer(SqliteStore store, ServerPaths paths, ILogger<FileIndexer> logger) : BackgroundService
 {
-    static readonly TimeSpan Interval = TimeSpan.FromSeconds(30);
+    static readonly TimeSpan Interval = TimeSpan.FromMinutes(5);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -35,14 +35,26 @@ public static class FileIndexScanner
         var root = Path.GetFullPath(arma3Dir);
         if (!Directory.Exists(root)) return;
         var known = await store.GetIndexedDirectoriesAsync();
+        var childrenByParent = known
+            .Where(entry => entry.Key != entry.Value.Parent)
+            .GroupBy(entry => entry.Value.Parent, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         var scanGen = await store.GetNextFileIndexScanGenerationAsync();
         var upserts = new List<FileIndexRow>();
         var visitedDirs = new List<string>();
-        Scan(root, "", known, scanGen, upserts, visitedDirs, ct);
+        Scan(root, "", known, childrenByParent, scanGen, upserts, visitedDirs, ct);
         await store.ApplyFileIndexScanAsync(upserts, visitedDirs, scanGen);
     }
 
-    static long Scan(string fullPath, string relPath, Dictionary<string, (string Parent, DateTime MTime, long Size)> known, long scanGen, List<FileIndexRow> upserts, List<string> visitedDirs, CancellationToken ct)
+    static long Scan(
+        string fullPath,
+        string relPath,
+        Dictionary<string, (string Parent, DateTime MTime, long Size)> known,
+        Dictionary<string, KeyValuePair<string, (string Parent, DateTime MTime, long Size)>[]> childrenByParent,
+        long scanGen,
+        List<FileIndexRow> upserts,
+        List<string> visitedDirs,
+        CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var mtime = Directory.GetLastWriteTimeUtc(fullPath);
@@ -59,14 +71,14 @@ public static class FileIndexScanner
             // reconciliation must not sweep them just because their row wasn't touched this cycle.
             // Exclude relPath itself: the root row is self-referential (parent == path == ""), and without
             // this guard it would match here as its own "child", causing infinite recursion.
-            var childDirs = known.Where(kv => kv.Value.Parent == relPath && kv.Key != relPath).ToList();
+            var childDirs = childrenByParent.GetValueOrDefault(relPath) ?? [];
             var directFileSize = Math.Max(0, previous.Size - childDirs.Sum(kv => kv.Value.Size));
             total = directFileSize;
             foreach (var (childRel, _) in childDirs)
             {
                 var childFull = Path.Combine(fullPath, Path.GetFileName(childRel));
                 if (!Directory.Exists(childFull)) continue; // removed; will be reconciled once its true parent is re-enumerated
-                total += Scan(childFull, childRel, known, scanGen, upserts, visitedDirs, ct);
+                total += Scan(childFull, childRel, known, childrenByParent, scanGen, upserts, visitedDirs, ct);
             }
         }
         else
@@ -80,7 +92,7 @@ public static class FileIndexScanner
                 if (ProtectedFiles.IsProtected(entryRel)) continue;
                 if (Directory.Exists(entry))
                 {
-                    total += Scan(entry, entryRel, known, scanGen, upserts, visitedDirs, ct);
+                    total += Scan(entry, entryRel, known, childrenByParent, scanGen, upserts, visitedDirs, ct);
                 }
                 else
                 {

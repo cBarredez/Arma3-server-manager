@@ -102,7 +102,6 @@ const state = {
   currentConfig: 'server.cfg',
   currentFilePath: null,
   fileItems   : [],
-  fileView    : localStorage.getItem('a3mgr-file-view') || 'list',
   fileSortKey : 'name',
   fileSortDir : 'asc',
   socket      : null,
@@ -1253,37 +1252,10 @@ async function loadFiles(dir) {
     this.value = '';
   };
   initFileDropZone();
-  initFileViewToggle();
 }
 
 function renderCurrentFileView() {
-  if (state.fileView === 'table') renderFileTable(state.fileItems, state.currentFilePath);
-  else renderFileList(state.fileItems, state.currentFilePath);
-}
-
-function initFileViewToggle() {
-  const listBtn = document.getElementById('btn-view-list');
-  const tableBtn = document.getElementById('btn-view-table');
-  if (!listBtn || !tableBtn || listBtn.dataset.ready === 'true') { updateFileViewButtons(); return; }
-  listBtn.dataset.ready = 'true';
-
-  const setView = (view) => {
-    state.fileView = view;
-    localStorage.setItem('a3mgr-file-view', view);
-    updateFileViewButtons();
-    renderCurrentFileView();
-  };
-  listBtn.addEventListener('click', () => setView('list'));
-  tableBtn.addEventListener('click', () => setView('table'));
-  updateFileViewButtons();
-}
-
-function updateFileViewButtons() {
-  const listBtn = document.getElementById('btn-view-list');
-  const tableBtn = document.getElementById('btn-view-table');
-  if (!listBtn || !tableBtn) return;
-  listBtn.classList.toggle('active', state.fileView === 'list');
-  tableBtn.classList.toggle('active', state.fileView === 'table');
+  renderFileTable(state.fileItems, state.currentFilePath);
 }
 
 async function uploadFiles(files) {
@@ -1355,67 +1327,6 @@ function renderBreadcrumb(relPath, rootName = 'Arma 3 Server') {
   });
 }
 
-function renderFileList(items, currentPath) {
-  const container = document.getElementById('file-list');
-  if (!items.length) { container.innerHTML = '<div class="text-muted py-2">Empty directory</div>'; return; }
-
-  container.innerHTML = items.map(item => {
-    const icon = item.isDir ? 'folder' : getFileIcon(item.name);
-    const size = item.isDir ? '' : `<span class="fi-size">${fmtBytes(item.size)}</span>`;
-    return `
-      <div class="file-item ${item.isDir ? 'is-dir' : ''}" data-path="${escAttr(item.path)}" data-is-dir="${item.isDir}">
-        <i class="fa fa-${icon} fi-icon"></i>
-        <span class="fi-name">${escHtml(item.name)}</span>
-        ${size}
-        <div class="fi-actions">
-          ${!item.isDir ? `<button class="btn btn-sm btn-outline-secondary btn-icon" data-edit="${escAttr(item.path)}" title="Edit"><i class="fa fa-pen-to-square"></i></button>` : ''}
-          <button class="btn btn-sm btn-outline-secondary btn-icon" data-rename="${escAttr(item.path)}" data-name="${escAttr(item.name)}" title="Rename"><i class="fa fa-pencil"></i></button>
-          <button class="btn btn-sm btn-outline-danger btn-icon" data-del="${escAttr(item.path)}" title="Delete"><i class="fa fa-trash"></i></button>
-        </div>
-      </div>`;
-  }).join('');
-
-  // Navigate into dirs
-  container.querySelectorAll('.file-item.is-dir').forEach(el => {
-    el.addEventListener('click', e => {
-      if (!e.target.closest('.fi-actions')) loadFiles(el.dataset.path);
-    });
-  });
-
-  // Edit file
-  container.querySelectorAll('[data-edit]').forEach(btn => {
-    btn.addEventListener('click', e => { e.stopPropagation(); openFileEditor(btn.dataset.edit); });
-  });
-
-  // Rename
-  container.querySelectorAll('[data-rename]').forEach(btn => {
-    btn.addEventListener('click', async e => {
-      e.stopPropagation();
-      const oldName = btn.dataset.name;
-      const newName = window.prompt('Rename to:', oldName);
-      if (!newName || newName === oldName) return;
-      try {
-        await PUT('/api/files/rename', { path: btn.dataset.rename, newName });
-        toast('Renamed to ' + newName);
-        loadFiles(currentPath);
-      } catch (e2) { toast(e2.message, 'error'); }
-    });
-  });
-
-  // Delete
-  container.querySelectorAll('[data-del]').forEach(btn => {
-    btn.addEventListener('click', async e => {
-      e.stopPropagation();
-      if (!confirm(`Delete "${btn.dataset.del.split('/').pop()}"?`)) return;
-      try {
-        await DELETE(`/api/files?path=${encodeURIComponent(btn.dataset.del)}`);
-        toast('Deleted');
-        loadFiles(currentPath);
-      } catch (e2) { toast(e2.message, 'error'); }
-    });
-  });
-}
-
 function sortFileItems(items) {
   const dir = state.fileSortDir === 'desc' ? -1 : 1;
   const key = state.fileSortKey;
@@ -1438,7 +1349,7 @@ function renderFileTable(items, currentPath) {
 
   const columns = [
     { key: 'name', label: 'Name' },
-    { key: 'created', label: 'Origin' },
+    { key: 'created', label: 'Created' },
     { key: 'mtime', label: 'Modified' },
     { key: 'size', label: 'Size' },
   ];
@@ -1461,7 +1372,14 @@ function renderFileTable(items, currentPath) {
       </tr>`;
   }).join('');
 
-  container.innerHTML = `<table class="mod-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  container.innerHTML = `
+    <div class="file-table-wrap">
+      <table class="mod-table file-table">
+        <colgroup><col><col class="file-date-col"><col class="file-date-col"><col class="file-size-col"><col class="file-actions-col"></colgroup>
+        <thead><tr>${head}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
 
   container.querySelectorAll('th[data-sort]').forEach(th => {
     th.addEventListener('click', () => {
@@ -1509,17 +1427,29 @@ function renderFileTable(items, currentPath) {
   });
 }
 
+let fileCodeEditor = null;
+let configCodeEditor = null;
+let syntaxEditorModule = null;
+
+async function mountCodeEditor(hostId, value, filename) {
+  syntaxEditorModule ??= await import('./syntax-editor.js');
+  return syntaxEditorModule.mountSyntaxEditor(document.getElementById(hostId), value, filename);
+}
+
 async function openFileEditor(filePath) {
   const panel = document.getElementById('file-editor-panel');
   try {
     const { content } = await GET(`/api/files/content?path=${encodeURIComponent(filePath)}`);
-    document.getElementById('editor-filename').textContent = filePath.split('/').pop();
-    document.getElementById('file-editor').value = content;
+    const filename = filePath.split('/').pop();
+    document.getElementById('editor-filename').textContent = filename;
     panel.classList.remove('d-none');
+    fileCodeEditor?.destroy();
+    fileCodeEditor = await mountCodeEditor('file-editor', content, filename);
+    fileCodeEditor.focus();
 
     document.getElementById('btn-save-file').onclick = async () => {
       try {
-        await PUT('/api/files/content', { path: filePath, content: document.getElementById('file-editor').value });
+        await PUT('/api/files/content', { path: filePath, content: fileCodeEditor.getValue() });
         toast('File saved');
       } catch (e) { toast(e.message, 'error'); }
     };
@@ -1542,7 +1472,8 @@ async function loadConfig(file) {
   loadStartupSettings();
   try {
     const { content } = await GET(`/api/config?file=${encodeURIComponent(file)}`);
-    document.getElementById('config-editor').value = content;
+    configCodeEditor?.destroy();
+    configCodeEditor = await mountCodeEditor('config-editor', content, file);
   } catch (e) { toast(e.message, 'error'); }
 
   // Tab switching
@@ -1557,7 +1488,7 @@ async function loadConfig(file) {
 
   document.getElementById('btn-save-config').onclick = async () => {
     try {
-      await PUT('/api/config', { file: state.currentConfig, content: document.getElementById('config-editor').value });
+      await PUT('/api/config', { file: state.currentConfig, content: configCodeEditor.getValue() });
       toast('Config saved');
     } catch (e) { toast(e.message, 'error'); }
   };
@@ -1668,17 +1599,25 @@ function getChecked(id) { return !!document.getElementById(id)?.checked; }
 
 // ─── log SSE state ────────────────────────────────────────────────────────────
 let logEventSource = null;
-let logIndex = 0;
+let logCursor = 0;
+
+function setLogStreamStatus(label, style) {
+  const status = document.getElementById('log-stream-status');
+  if (!status) return;
+  status.textContent = label;
+  status.className = `badge text-bg-${style}`;
+}
 
 function stopLogStream() {
   if (logEventSource) { logEventSource.close(); logEventSource = null; }
+  setLogStreamStatus('Paused', 'secondary');
 }
 
 async function loadLogs() {
   stopLogStream();
   const out = document.getElementById('log-output');
   out.textContent = '';
-  logIndex = 0;
+  logCursor = 0;
 
   document.getElementById('btn-clear-logs').onclick = () => { out.textContent = ''; };
 
@@ -1687,25 +1626,28 @@ async function loadLogs() {
     const entries = await GET('/api/logs?limit=300');
     if (entries.length) {
       out.textContent = entries.map(e => formatLogEntry(e)).join('');
-      logIndex = entries.length;
+      logCursor = Number(entries.at(-1)?.id) || 0;
     }
   } catch (e) { out.textContent = 'Error loading logs: ' + e.message; }
 
   if (document.getElementById('log-autoscroll')?.checked) out.scrollTop = out.scrollHeight;
 
-  // Open SSE stream for new entries
-  // Open SSE stream for new entries (SSE is plain HTTP, works everywhere)
   startLogStream(out);
 }
 
 function startLogStream(out) {
-  const url = apiUrl(`/api/logs/stream?since=${logIndex}`);
+  setLogStreamStatus('Connecting', 'secondary');
+  const url = apiUrl(`/api/logs/stream?since=${logCursor}`);
   logEventSource = new EventSource(url, { withCredentials: true });
+
+  logEventSource.onopen = () => setLogStreamStatus('Live', 'success');
 
   logEventSource.onmessage = e => {
     try {
       const entry = JSON.parse(e.data);
-      logIndex++;
+      const entryId = Number(entry.id) || 0;
+      if (entryId && entryId <= logCursor) return;
+      logCursor = Math.max(logCursor, entryId);
       appendLogLine(out, entry);
     } catch { /* ignore malformed */ }
   };
@@ -1722,7 +1664,7 @@ function startLogStream(out) {
   });
 
   logEventSource.onerror = () => {
-    // EventSource will auto-reconnect; nothing to do
+    setLogStreamStatus('Reconnecting', 'warning');
   };
 }
 

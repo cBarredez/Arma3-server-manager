@@ -405,6 +405,11 @@ html, body {
 }
 .code-editor:focus { border-color: var(--accent); }
 
+.syntax-editor-host {
+  min-height: 420px;
+  width: 100%;
+}
+
 /* ─── Mod list table ────────────────────────────────────────────────────── */
 .mod-table { width: 100%; border-collapse: collapse; }
 .mod-table th {
@@ -475,6 +480,33 @@ html, body {
 .file-item .fi-size { color: var(--text-muted); font-size: .78rem; white-space: nowrap; }
 .file-item .fi-actions { display: none; gap: .3rem; }
 .file-item:hover .fi-actions { display: flex; }
+
+.file-table-wrap {
+  overflow-x: auto;
+  width: 100%;
+}
+.file-table {
+  min-width: 760px;
+  table-layout: fixed;
+}
+.file-table .file-item { display: table-row; }
+.file-table .file-date-col { width: 190px; }
+.file-table .file-size-col { width: 110px; }
+.file-table .file-actions-col { width: 132px; }
+.file-table td:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-table td:nth-child(2),
+.file-table td:nth-child(3),
+.file-table td:nth-child(4) { white-space: nowrap; }
+.file-table .file-item .fi-actions {
+  display: table-cell;
+  text-align: right;
+  white-space: nowrap;
+}
+.file-table .fi-actions .btn + .btn { margin-left: .3rem; }
 
 /* Breadcrumb */
 .breadcrumb { background: none; padding: 0; margin: 0; }

@@ -11,7 +11,31 @@ public sealed class RuntimeState
     Process? process;
     readonly List<LogEntry> logs = [];
     readonly SemaphoreSlim taskGate = new(1, 1);
-    public IReadOnlyList<LogEntry> Logs => logs;
+    long nextLogId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
+    TaskCompletionSource<bool> logSignal = NewLogSignal();
+    public IReadOnlyList<LogEntry> Logs
+    {
+        get { lock (logs) return logs.ToArray(); }
+    }
+
+    public async Task<IReadOnlyList<LogEntry>> WaitForLogsAfterAsync(long id, TimeSpan timeout, CancellationToken ct)
+    {
+        Task signal;
+        lock (logs)
+        {
+            var pending = logs.Where(entry => entry.Id > id).ToArray();
+            if (pending.Length > 0) return pending;
+            signal = logSignal.Task;
+        }
+
+        try { await signal.WaitAsync(timeout, ct); }
+        catch (TimeoutException) { }
+
+        lock (logs) return logs.Where(entry => entry.Id > id).ToArray();
+    }
+
+    static TaskCompletionSource<bool> NewLogSignal() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool IsRunning => process is { HasExited: false };
     public int? ProcessId => IsRunning ? process!.Id : null;
 
@@ -66,11 +90,15 @@ public sealed class RuntimeState
     }
     public void Push(string type, string data)
     {
+        TaskCompletionSource<bool> signal;
         lock (logs)
         {
-            logs.Add(new(type, data, DateTimeOffset.UtcNow));
+            logs.Add(new(type, data, DateTimeOffset.UtcNow, ++nextLogId));
             if (logs.Count > 1000) logs.RemoveAt(0);
+            signal = logSignal;
+            logSignal = NewLogSignal();
         }
+        signal.TrySetResult(true);
     }
 }
 
