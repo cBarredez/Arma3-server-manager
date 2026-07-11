@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import os
 import shlex
 import shutil
 import subprocess
@@ -98,6 +99,7 @@ def manager_config() -> dict:
         "server.query_port": server.get("query_port"),
         "server.battleye_port": server.get("battleye_port"),
         "server.von_port": server.get("von_port"),
+        "server.rcon_port": server.get("rcon_port"),
     }.items():
         if not isinstance(value, int) or not 1 <= value <= 65535:
             raise SystemExit(f"{name} must be an integer between 1 and 65535")
@@ -109,7 +111,7 @@ def manager_config() -> dict:
         raise SystemExit("web.bind_ip must be a valid IP address") from error
     if not str(server.get("arma3_dir", "")).startswith("/"):
         raise SystemExit("server.arma3_dir must be an absolute Linux path")
-    game_ports = [server.get(name) for name in ("port", "query_port", "battleye_port", "von_port")]
+    game_ports = [server.get(name) for name in ("port", "query_port", "battleye_port", "von_port", "rcon_port")]
     if len(set(game_ports)) != len(game_ports):
         raise SystemExit("server UDP ports must be different")
     if server.get("network_mode") == "host" and web.get("port") == web.get("public_port"):
@@ -158,9 +160,10 @@ def upload_release(target: Target, release: str) -> str:
     remote_dir = f"{target.remote_root}/releases/{release}"
     remote(target, ["mkdir", "-p", remote_dir, f"{target.remote_root}/config"])
     archive = subprocess.Popen(
-        ["tar", "-czf", "-", "--exclude=.git", "--exclude=node_modules", "--exclude=dist", "--exclude=bin", "--exclude=obj", "--exclude=manager.secrets.toml", "."],
+        ["tar", "-czf", "-", "--exclude=.git", "--exclude=node_modules", "--exclude=dist", "--exclude=bin", "--exclude=obj", "--exclude=._*", "--exclude=manager.secrets.toml", "."],
         cwd=ROOT,
         stdout=subprocess.PIPE,
+        env={**os.environ, "COPYFILE_DISABLE": "1"},
     )
     assert archive.stdout is not None
     extract = subprocess.run(["ssh"] + _ssh_opts(target) + [target.ssh, f"tar -xzf - -C {shlex.quote(remote_dir)}"], stdin=archive.stdout)
@@ -177,7 +180,7 @@ def upload_release(target: Target, release: str) -> str:
 def ensure_runtime(target: Target) -> None:
     remote(target, ["podman", "network", "create", NETWORK], check=False)
     for volume in ("arma3-server", "steam-home", "steam-config", "aspnet-keys"):
-        remote(target, ["podman", "volume", "create", volume])
+        remote(target, ["podman", "volume", "create", volume], check=False)
     secret_file = f"{target.remote_root}/config/manager.secrets.toml"
     marker = remote_capture(target, ["sh", "-c", f"test -f {secret_file} && echo yes || true"], check=False)
     if marker == "yes":

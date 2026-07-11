@@ -1,6 +1,7 @@
 services:
   api:
     network_mode: host
+    networks: !reset []
     command: ["dotnet", "Arma3Manager.Api.dll", "--config=/app/config/manager.host.toml"]
     ports: []
 

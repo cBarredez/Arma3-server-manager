@@ -7,6 +7,8 @@ services:
     container_name: arma3-api
     restart: unless-stopped
     mem_limit: 14g
+    networks:
+      - arma3-net
     ports:
       - "2302:2302/udp"
       - "2303:2303/udp"
@@ -28,12 +30,18 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+    networks:
+      - arma3-net
     environment:
       ARMA3_API_BASE: ""
       ARMA3_REST_ONLY: "true"
       ARMA3_API_BACKEND: "api:8080"
     ports:
       - "127.0.0.1:8080:8080/tcp"
+
+networks:
+  arma3-net:
+    driver: bridge
 
 volumes:
   arma3-server:
