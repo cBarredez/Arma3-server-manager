@@ -248,15 +248,16 @@ public static class ApiEndpoints
             return dlc is null ? Results.Json(new { error = "Creator DLC not found" }, statusCode: 404) : Results.Json(dlc);
         });
         
-        api.MapGet("/metrics", () =>
+        api.MapGet("/metrics", (MetricsSampler sampler) =>
         {
             var memory = MetricsReader.ReadMemory();
+            var sample = sampler.Current;
             return Results.Json(new
             {
-                cpu = new { load = 0, cores = Array.Empty<int>() },
+                cpu = sample.Cpu,
                 memory,
                 disk = new[] { MetricsReader.ReadDisk(paths.Arma3Dir, "/arma3") },
-                temperature = (int?)null,
+                temperature = sample.Temperature,
                 network = Array.Empty<object>()
             });
         });

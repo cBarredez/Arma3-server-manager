@@ -2,6 +2,7 @@ using Arma3Manager.Api.Application;
 using Arma3Manager.Api.Configuration;
 using Arma3Manager.Api.Domain;
 using Arma3Manager.Api.Endpoints;
+using Arma3Manager.Api.Infrastructure;
 using Arma3Manager.Api.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -20,6 +21,8 @@ builder.Services.AddSingleton(store);
 builder.Services.AddSingleton<RuntimeState>();
 builder.Services.AddSingleton<SteamCmdSession>();
 builder.Services.AddSingleton<BattlEyeRconClient>();
+builder.Services.AddSingleton<MetricsSampler>();
+builder.Services.AddHostedService(services => services.GetRequiredService<MetricsSampler>());
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession(options =>
 {

@@ -16,6 +16,7 @@ services:
       - "2305:2305/udp"
     volumes:
       - ./config:/app/config:ro
+      - /sys:/host-sys:ro
       - arma3-server:/arma3
       - steam-home:/home/arma3/Steam
       - steam-config:/home/arma3/.steam

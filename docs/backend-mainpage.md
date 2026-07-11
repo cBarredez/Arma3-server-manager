@@ -13,6 +13,11 @@ del servidor dedicado, SteamCMD, mods, archivos, métricas y configuración.
 - `Infrastructure`: SQLite, métricas del contenedor y reparación de mods.
 - `Security`: derivación y verificación de credenciales.
 
+La carga de CPU se muestrea desde el cgroup v2 del contenedor API/Arma. La
+temperatura se consulta desde el sysfs del host montado como solo lectura; en
+WSL, máquinas virtuales o hardware sin sensores disponibles el API devuelve
+`null` sin afectar el resto de las métricas.
+
 ## Configuración y estado
 
 La configuración de infraestructura se lee desde `config/manager.toml`. Los
