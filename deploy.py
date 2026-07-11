@@ -236,7 +236,7 @@ def frontend_command(image: str) -> list[str]:
 def wait_healthy(target: Target, container: str, timeout: int = 120) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        state = remote_capture(target, ["podman", "inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", container], check=False)
+        state = remote_capture(target, ["podman", "inspect", "--format", "{{if .State.Health}}{{if .State.Health.Status}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}{{else}}{{.State.Status}}{{end}}", container], check=False)
         if state in {"healthy", "running"}:
             print(f"{container}: {state}")
             return True
