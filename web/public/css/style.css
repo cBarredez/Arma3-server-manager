@@ -426,6 +426,10 @@ html, body {
 .mod-table tr:last-child td { border-bottom: none; }
 .mod-table tr:hover td { background: var(--surface-alt); }
 
+.mod-table th[data-sort] { cursor: pointer; user-select: none; }
+.mod-table th[data-sort]:hover { color: var(--text-primary); }
+.mod-table th[data-sort] .sort-arrow { margin-left: .3rem; opacity: .6; }
+
 .mod-name { font-weight: 500; }
 .mod-id   { color: var(--text-muted); font-family: monospace; font-size: .8rem; text-decoration: none; display: inline-block; }
 .mod-id:hover { color: var(--accent); }

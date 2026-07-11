@@ -145,7 +145,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
               <div>
                 <div class="metric-value" id="m-disk">—</div>
                 <div class="metric-subvalue" id="m-disk-detail">—</div>
-                <div class="metric-label">Disk Used</div>
+                <div class="metric-label">Server Data</div>
               </div>
             </div>
           </div>
@@ -340,6 +340,10 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
           <div class="panel-header d-flex justify-content-between align-items-center">
             <span><i class="fa fa-folder-open me-2"></i>File Manager</span>
             <div class="d-flex gap-2">
+              <div class="btn-group btn-group-sm" role="group" aria-label="File view">
+                <button type="button" id="btn-view-list" class="btn btn-outline-secondary" title="List view"><i class="fa fa-list"></i></button>
+                <button type="button" id="btn-view-table" class="btn btn-outline-secondary" title="Table view"><i class="fa fa-table"></i></button>
+              </div>
               <label class="btn btn-sm btn-outline-primary mb-0">
                 <i class="fa fa-upload me-1"></i>Upload
                 <input type="file" id="file-upload-input" class="d-none" multiple />

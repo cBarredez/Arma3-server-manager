@@ -68,6 +68,14 @@ function fmtPercent(value) {
   return n > 0 && n < 10 ? n.toFixed(1) + '%' : Math.round(n) + '%';
 }
 
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' }) +
+    ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
 function metricNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
@@ -93,6 +101,10 @@ const state = {
   serverRunning: false,
   currentConfig: 'server.cfg',
   currentFilePath: null,
+  fileItems   : [],
+  fileView    : localStorage.getItem('a3mgr-file-view') || 'list',
+  fileSortKey : 'name',
+  fileSortDir : 'asc',
   socket      : null,
   cpuHistory  : [],
   memHistory  : [],
@@ -551,8 +563,16 @@ function renderMetrics(d) {
   renderUsageMetric('m-mem', 'm-mem-detail', d.memory);
   const temperature = metricNumber(d.temperature);
   setText('m-temp', temperature === null ? '—' : temperature + '°C');
-  if (d.disk && d.disk.length) {
-    const armaDisk = d.disk.find(dk => dk.mount === '/arma3') || d.disk.find(dk => dk.mount === '/') || d.disk[0];
+  const armaDisk = d.disk && d.disk.length
+    ? (d.disk.find(dk => dk.mount === '/arma3') || d.disk.find(dk => dk.mount === '/') || d.disk[0])
+    : null;
+  if (d.trackedDiskUsage) {
+    // Real bytes used by the server's own data (mods, missions, etc.), tracked by the file-index watchdog —
+    // more meaningful than raw host-disk usage, which also counts unrelated data on the same volume.
+    setText('m-disk', fmtBytes(d.trackedDiskUsage.bytes));
+    setText('m-disk-detail', armaDisk ? `${fmtBytes(armaDisk.available)} free on host` : '—');
+  } else if (armaDisk) {
+    // Fall back to host-disk percentage until the watchdog completes its first scan.
     renderUsageMetric('m-disk', 'm-disk-detail', { ...armaDisk, total: armaDisk.size });
   }
 }
@@ -1220,8 +1240,9 @@ async function loadFiles(dir) {
   try {
     const data = await GET('/api/files' + (dir ? `?path=${encodeURIComponent(dir)}` : ''));
     state.currentFilePath = data.path || '';
+    state.fileItems = data.items || [];
     renderBreadcrumb(data.path || '', data.rootName || 'Arma 3 Server');
-    renderFileList(data.items, data.path);
+    renderCurrentFileView();
   } catch (e) {
     container.innerHTML = `<div class="text-danger">${e.message}</div>`;
   }
@@ -1232,6 +1253,37 @@ async function loadFiles(dir) {
     this.value = '';
   };
   initFileDropZone();
+  initFileViewToggle();
+}
+
+function renderCurrentFileView() {
+  if (state.fileView === 'table') renderFileTable(state.fileItems, state.currentFilePath);
+  else renderFileList(state.fileItems, state.currentFilePath);
+}
+
+function initFileViewToggle() {
+  const listBtn = document.getElementById('btn-view-list');
+  const tableBtn = document.getElementById('btn-view-table');
+  if (!listBtn || !tableBtn || listBtn.dataset.ready === 'true') { updateFileViewButtons(); return; }
+  listBtn.dataset.ready = 'true';
+
+  const setView = (view) => {
+    state.fileView = view;
+    localStorage.setItem('a3mgr-file-view', view);
+    updateFileViewButtons();
+    renderCurrentFileView();
+  };
+  listBtn.addEventListener('click', () => setView('list'));
+  tableBtn.addEventListener('click', () => setView('table'));
+  updateFileViewButtons();
+}
+
+function updateFileViewButtons() {
+  const listBtn = document.getElementById('btn-view-list');
+  const tableBtn = document.getElementById('btn-view-table');
+  if (!listBtn || !tableBtn) return;
+  listBtn.classList.toggle('active', state.fileView === 'list');
+  tableBtn.classList.toggle('active', state.fileView === 'table');
 }
 
 async function uploadFiles(files) {
@@ -1351,6 +1403,99 @@ function renderFileList(items, currentPath) {
   });
 
   // Delete
+  container.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm(`Delete "${btn.dataset.del.split('/').pop()}"?`)) return;
+      try {
+        await DELETE(`/api/files?path=${encodeURIComponent(btn.dataset.del)}`);
+        toast('Deleted');
+        loadFiles(currentPath);
+      } catch (e2) { toast(e2.message, 'error'); }
+    });
+  });
+}
+
+function sortFileItems(items) {
+  const dir = state.fileSortDir === 'desc' ? -1 : 1;
+  const key = state.fileSortKey;
+  return [...items].sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1; // folders always first, regardless of sort column
+    let av, bv;
+    if (key === 'size') { av = a.size; bv = b.size; }
+    else if (key === 'created') { av = a.created || ''; bv = b.created || ''; }
+    else if (key === 'mtime') { av = a.modified || ''; bv = b.modified || ''; }
+    else { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+}
+
+function renderFileTable(items, currentPath) {
+  const container = document.getElementById('file-list');
+  if (!items.length) { container.innerHTML = '<div class="text-muted py-2">Empty directory</div>'; return; }
+
+  const columns = [
+    { key: 'name', label: 'Name' },
+    { key: 'created', label: 'Origin' },
+    { key: 'mtime', label: 'Modified' },
+    { key: 'size', label: 'Size' },
+  ];
+  const arrow = (key) => state.fileSortKey === key ? `<span class="sort-arrow">${state.fileSortDir === 'desc' ? '▼' : '▲'}</span>` : '';
+  const head = columns.map(c => `<th data-sort="${c.key}">${c.label}${arrow(c.key)}</th>`).join('') + '<th></th>';
+
+  const rows = sortFileItems(items).map(item => {
+    const icon = item.isDir ? 'folder' : getFileIcon(item.name);
+    return `
+      <tr class="file-item ${item.isDir ? 'is-dir' : ''}" data-path="${escAttr(item.path)}" data-is-dir="${item.isDir}">
+        <td><i class="fa fa-${icon} fi-icon me-2"></i>${escHtml(item.name)}</td>
+        <td>${fmtDate(item.created)}</td>
+        <td>${fmtDate(item.modified)}</td>
+        <td>${fmtBytes(item.size)}</td>
+        <td class="fi-actions">
+          ${!item.isDir ? `<button class="btn btn-sm btn-outline-secondary btn-icon" data-edit="${escAttr(item.path)}" title="Edit"><i class="fa fa-pen-to-square"></i></button>` : ''}
+          <button class="btn btn-sm btn-outline-secondary btn-icon" data-rename="${escAttr(item.path)}" data-name="${escAttr(item.name)}" title="Rename"><i class="fa fa-pencil"></i></button>
+          <button class="btn btn-sm btn-outline-danger btn-icon" data-del="${escAttr(item.path)}" title="Delete"><i class="fa fa-trash"></i></button>
+        </td>
+      </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table class="mod-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+
+  container.querySelectorAll('th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (state.fileSortKey === key) state.fileSortDir = state.fileSortDir === 'asc' ? 'desc' : 'asc';
+      else { state.fileSortKey = key; state.fileSortDir = 'asc'; }
+      renderFileTable(items, currentPath);
+    });
+  });
+
+  container.querySelectorAll('tr.file-item.is-dir').forEach(el => {
+    el.addEventListener('click', e => {
+      if (!e.target.closest('.fi-actions')) loadFiles(el.dataset.path);
+    });
+  });
+
+  container.querySelectorAll('[data-edit]').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); openFileEditor(btn.dataset.edit); });
+  });
+
+  container.querySelectorAll('[data-rename]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const oldName = btn.dataset.name;
+      const newName = window.prompt('Rename to:', oldName);
+      if (!newName || newName === oldName) return;
+      try {
+        await PUT('/api/files/rename', { path: btn.dataset.rename, newName });
+        toast('Renamed to ' + newName);
+        loadFiles(currentPath);
+      } catch (e2) { toast(e2.message, 'error'); }
+    });
+  });
+
   container.querySelectorAll('[data-del]').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
