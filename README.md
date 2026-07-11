@@ -160,7 +160,9 @@ El script:
 4. conserva volúmenes;
 5. reemplaza únicamente el contenedor seleccionado;
 6. espera el health check;
-7. restaura la imagen anterior si la actualización falla.
+7. restaura la imagen anterior si la actualización falla;
+8. reinicia el frontend tras un deploy exclusivo del backend para que Nginx
+   resuelva la dirección del nuevo contenedor API.
 
 Para acceder al panel de desarrollo desde otra computadora, cambia
 `web.bind_ip` a `"0.0.0.0"`. Conserva `"127.0.0.1"` si el panel estará detrás

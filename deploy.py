@@ -221,7 +221,7 @@ def api_command(target: Target, image: str, remote_dir: str) -> list[str]:
     if not secret:
         raise SystemExit("Backend deploy requires config/manager.secrets.toml locally or on the remote server")
     command += secret
-    command += ["-v", "arma3-server:/arma3", "-v", "steam-home:/home/arma3/Steam", "-v", "steam-config:/home/arma3/.steam", "-v", "aspnet-keys:/home/arma3/.aspnet", image]
+    command += ["-v", "/sys:/host-sys:ro", "-v", "arma3-server:/arma3", "-v", "steam-home:/home/arma3/Steam", "-v", "steam-config:/home/arma3/.steam", "-v", "aspnet-keys:/home/arma3/.aspnet", image]
     return command
 
 
@@ -257,6 +257,16 @@ def replace(target: Target, container: str, image: str, command: list[str], prev
     raise SystemExit(1)
 
 
+def restart_frontend_proxy(target: Target) -> None:
+    if current_image(target, "arma3-frontend") is None:
+        print("arma3-frontend is not deployed; skipping proxy restart")
+        return
+    result = remote(target, ["podman", "restart", "arma3-frontend"], check=False)
+    if result.returncode != 0 or not wait_healthy(target, "arma3-frontend"):
+        raise SystemExit("Backend is healthy, but arma3-frontend could not be restarted")
+    print("arma3-frontend restarted with the new API address")
+
+
 def deploy(args: argparse.Namespace) -> int:
     target = validate_local(args.environment)
     verify_tools()
@@ -272,6 +282,8 @@ def deploy(args: argparse.Namespace) -> int:
     if args.frontend:
         image = build_image(target, remote_dir, release, "frontend")
         replace(target, "arma3-frontend", image, frontend_command(image), current_image(target, "arma3-frontend"))
+    elif args.backend:
+        restart_frontend_proxy(target)
     print(f"Deployment {release} to {target.environment} completed")
     return 0
 
