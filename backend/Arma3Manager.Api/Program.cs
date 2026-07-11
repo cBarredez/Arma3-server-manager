@@ -23,6 +23,8 @@ builder.Services.AddSingleton<SteamCmdSession>();
 builder.Services.AddSingleton<BattlEyeRconClient>();
 builder.Services.AddSingleton<MetricsSampler>();
 builder.Services.AddHostedService(services => services.GetRequiredService<MetricsSampler>());
+builder.Services.AddSingleton<FileIndexer>();
+builder.Services.AddHostedService(services => services.GetRequiredService<FileIndexer>());
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession(options =>
 {

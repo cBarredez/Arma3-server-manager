@@ -24,6 +24,8 @@ public sealed class SqliteStore(string dbPath)
         create table if not exists modlists (id text primary key, name text not null, mods_json text not null, created_at text not null);
         create table if not exists app_state (key text primary key, value text not null);
         create table if not exists task_history (id integer primary key autoincrement, kind text not null, command text not null, exit_code integer null, created_at text not null);
+        create table if not exists file_index (path text primary key, parent text not null, name text not null, is_dir integer not null, size integer not null, created_utc text not null, mtime_utc text not null, scan_gen integer not null);
+        create index if not exists ix_file_index_parent on file_index(parent);
         """;
         await command.ExecuteNonQueryAsync();
     }
@@ -143,4 +145,126 @@ public sealed class SqliteStore(string dbPath)
     Task SetRawStateAsync(string key, string value) => SetRawAsync("app_state", key, value);
     async Task<string?> GetRawAsync(string table, string key) { await using var connection = Open(); var command = connection.CreateCommand(); command.CommandText = $"select value from {table} where key=$key"; command.Parameters.AddWithValue("$key", key); return (string?)await command.ExecuteScalarAsync(); }
     async Task SetRawAsync(string table, string key, string value) { await using var connection = Open(); var command = connection.CreateCommand(); command.CommandText = $"insert into {table}(key,value) values($key,$value) on conflict(key) do update set value=excluded.value"; command.Parameters.AddWithValue("$key", key); command.Parameters.AddWithValue("$value", value); await command.ExecuteNonQueryAsync(); }
+
+    // ── File index (watchdog-maintained metadata cache for the File Manager) ──────
+    public async Task<Dictionary<string, (string Parent, DateTime MTime, long Size)>> GetIndexedDirectoriesAsync()
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "select path, parent, mtime_utc, size from file_index where is_dir = 1";
+        var result = new Dictionary<string, (string, DateTime, long)>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result[reader.GetString(0)] = (reader.GetString(1), DateTime.Parse(reader.GetString(2), null, System.Globalization.DateTimeStyles.RoundtripKind), reader.GetInt64(3));
+        return result;
+    }
+
+    public async Task<long> GetNextFileIndexScanGenerationAsync()
+    {
+        var raw = await GetRawStateAsync("file-index-scan-gen");
+        var next = (raw is null ? 0L : long.Parse(raw)) + 1;
+        await SetRawStateAsync("file-index-scan-gen", next.ToString());
+        return next;
+    }
+
+    // `visitedDirs` must contain only directories whose entries were actually re-enumerated this cycle
+    // (not ones merely confirmed unchanged via the mtime fast-path) — reconciliation deletion is scoped
+    // to those directories' children only, since an unchanged directory's children were never re-checked
+    // for existence and must not be swept away just because their row wasn't touched this cycle.
+    public async Task ApplyFileIndexScanAsync(IReadOnlyList<FileIndexRow> upserts, IReadOnlyList<string> visitedDirs, long scanGen)
+    {
+        await using var connection = Open();
+        await using var transaction = await connection.BeginTransactionAsync();
+        foreach (var row in upserts)
+        {
+            var command = connection.CreateCommand();
+            command.CommandText = """
+            insert into file_index(path, parent, name, is_dir, size, created_utc, mtime_utc, scan_gen)
+            values ($path, $parent, $name, $isDir, $size, $created, $mtime, $gen)
+            on conflict(path) do update set parent=excluded.parent, name=excluded.name, is_dir=excluded.is_dir,
+                size=excluded.size, created_utc=excluded.created_utc, mtime_utc=excluded.mtime_utc, scan_gen=excluded.scan_gen
+            """;
+            command.Parameters.AddWithValue("$path", row.Path);
+            command.Parameters.AddWithValue("$parent", row.Parent);
+            command.Parameters.AddWithValue("$name", row.Name);
+            command.Parameters.AddWithValue("$isDir", row.IsDir ? 1 : 0);
+            command.Parameters.AddWithValue("$size", row.Size);
+            command.Parameters.AddWithValue("$created", row.Created.ToString("O"));
+            command.Parameters.AddWithValue("$mtime", row.MTime.ToString("O"));
+            command.Parameters.AddWithValue("$gen", scanGen);
+            await command.ExecuteNonQueryAsync();
+        }
+        if (visitedDirs.Count > 0)
+        {
+            var delete = connection.CreateCommand();
+            var parameterNames = visitedDirs.Select((_, i) => $"$p{i}").ToArray();
+            delete.CommandText = $"delete from file_index where scan_gen < $gen and parent in ({string.Join(",", parameterNames)})";
+            delete.Parameters.AddWithValue("$gen", scanGen);
+            for (var i = 0; i < visitedDirs.Count; i++) delete.Parameters.AddWithValue(parameterNames[i], visitedDirs[i]);
+            await delete.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
+    }
+
+    public async Task<FileItem[]?> GetFileIndexChildrenAsync(string relDir)
+    {
+        var normalized = NormalizeRelative(relDir);
+        await using var connection = Open();
+        var existsCommand = connection.CreateCommand();
+        existsCommand.CommandText = "select count(*) from file_index where path = $path";
+        existsCommand.Parameters.AddWithValue("$path", normalized);
+        var exists = Convert.ToInt64(await existsCommand.ExecuteScalarAsync()) > 0;
+        if (!exists) return null;
+
+        var command = connection.CreateCommand();
+        // path != parent excludes the root's own self-referential row (path='', parent='') from appearing
+        // as a child of itself when listing the root directory.
+        command.CommandText = "select name, path, is_dir, size, created_utc, mtime_utc from file_index where parent = $parent and path != $parent order by is_dir desc, name";
+        command.Parameters.AddWithValue("$parent", normalized);
+        var items = new List<FileItem>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var isDir = reader.GetInt32(2) == 1;
+            var created = DateTime.Parse(reader.GetString(4), null, System.Globalization.DateTimeStyles.RoundtripKind);
+            var modified = DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind);
+            items.Add(new FileItem(reader.GetString(0), reader.GetString(1), isDir, reader.GetInt64(3), modified, created));
+        }
+        return items.ToArray();
+    }
+
+    public async Task<long?> GetIndexedRootSizeAsync()
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "select size from file_index where path = ''";
+        var result = await command.ExecuteScalarAsync();
+        return result is null ? null : Convert.ToInt64(result);
+    }
+
+    public async Task RemoveFileIndexForDeletedPathAsync(string relPath)
+    {
+        var normalized = NormalizeRelative(relPath);
+        if (normalized.Length == 0) return; // never remove the root row this way
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        delete from file_index where path = $path
+            or (length(path) > length($path) and substr(path, 1, length($path) + 1) = $path || '/')
+        """;
+        command.Parameters.AddWithValue("$path", normalized);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task InvalidateFileIndexDirAsync(string relDir)
+    {
+        var normalized = NormalizeRelative(relDir);
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "delete from file_index where path = $path";
+        command.Parameters.AddWithValue("$path", normalized);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    static string NormalizeRelative(string? relPath) => (relPath ?? "").Replace('\\', '/').Trim('/');
 }

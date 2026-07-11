@@ -248,15 +248,17 @@ public static class ApiEndpoints
             return dlc is null ? Results.Json(new { error = "Creator DLC not found" }, statusCode: 404) : Results.Json(dlc);
         });
         
-        api.MapGet("/metrics", (MetricsSampler sampler) =>
+        api.MapGet("/metrics", async (MetricsSampler sampler) =>
         {
             var memory = MetricsReader.ReadMemory();
             var sample = sampler.Current;
+            var trackedBytes = await store.GetIndexedRootSizeAsync();
             return Results.Json(new
             {
                 cpu = sample.Cpu,
                 memory,
                 disk = new[] { MetricsReader.ReadDisk(paths.Arma3Dir, "/arma3") },
+                trackedDiskUsage = trackedBytes is null ? null : new { bytes = trackedBytes.Value },
                 temperature = sample.Temperature,
                 network = Array.Empty<object>()
             });
@@ -343,13 +345,9 @@ public static class ApiEndpoints
         api.MapGet("/files", async (string? path) =>
         {
             var dir = PathGuard.Resolve(cfg.Arma3Dir, path);
-            var items = await Task.Run(() => Directory.EnumerateFileSystemEntries(dir).Select(p =>
-            {
-                var info = new FileInfo(p);
-                var isDir = Directory.Exists(p);
-                return new FileItem(Path.GetFileName(p), PathGuard.Relative(cfg.Arma3Dir, p), isDir, isDir ? 0 : info.Length, info.LastWriteTimeUtc);
-            }).Where(i => !ProtectedFiles.IsProtected(i.Path)).OrderByDescending(i => i.IsDir).ThenBy(i => i.Name).ToArray());
-            return Results.Json(new { path = PathGuard.Relative(cfg.Arma3Dir, dir), rootName = "Arma 3 Server", items });
+            var rel = PathGuard.Relative(cfg.Arma3Dir, dir);
+            var items = await store.GetFileIndexChildrenAsync(rel) ?? await Task.Run(() => LiveListFallback(dir, cfg.Arma3Dir));
+            return Results.Json(new { path = rel, rootName = "Arma 3 Server", items });
         });
         api.MapGet("/files/content", async (string path) =>
         {
@@ -376,6 +374,9 @@ public static class ApiEndpoints
                 await using var output = File.Create(Path.Combine(target, Path.GetFileName(file.FileName)));
                 await file.CopyToAsync(output);
             }
+            // Invalidate just this directory's index row so the next listing falls back to a live read until
+            // the watchdog's next cycle re-indexes it — keeps the upload visible immediately.
+            await store.InvalidateFileIndexDirAsync(PathGuard.Relative(cfg.Arma3Dir, target));
             return Results.Json(new { ok = true, uploaded = request.Form.Files.Select(f => f.FileName).ToArray() });
         });
         api.MapDelete("/files", async (string path) =>
@@ -387,9 +388,10 @@ public static class ApiEndpoints
             if (Directory.Exists(target)) Directory.Delete(target, true);
             else if (File.Exists(target)) File.Delete(target);
             var removedMods = await store.RemoveModsForDeletedPathAsync(target);
+            await store.RemoveFileIndexForDeletedPathAsync(PathGuard.Relative(cfg.Arma3Dir, target));
             return Results.Json(new { ok = true, removedMods });
         });
-        
+
         api.MapPut("/files/rename", async (FileRenameRequest req) =>
         {
             var source = PathGuard.Resolve(cfg.Arma3Dir, req.Path);
@@ -408,6 +410,7 @@ public static class ApiEndpoints
             else File.Move(source, dest);
             var relNew = PathGuard.Relative(cfg.Arma3Dir, dest);
             await store.RemoveModsForDeletedPathAsync(source);
+            await store.RemoveFileIndexForDeletedPathAsync(PathGuard.Relative(cfg.Arma3Dir, source));
             return Results.Json(new { ok = true, newPath = relNew, newName });
         });
         
@@ -533,6 +536,16 @@ public static class ApiEndpoints
         });
         
     }
+
+    // Read-only listing used only when a directory hasn't been indexed yet (startup race, or a just-invalidated
+    // upload target). Never writes to file_index — the watchdog is the sole writer to avoid write contention.
+    static FileItem[] LiveListFallback(string dir, string arma3Dir) =>
+        Directory.EnumerateFileSystemEntries(dir).Select(p =>
+        {
+            var info = new FileInfo(p);
+            var isDir = Directory.Exists(p);
+            return new FileItem(Path.GetFileName(p), PathGuard.Relative(arma3Dir, p), isDir, isDir ? 0 : info.Length, info.LastWriteTimeUtc);
+        }).Where(i => !ProtectedFiles.IsProtected(i.Path)).OrderByDescending(i => i.IsDir).ThenBy(i => i.Name).ToArray();
 
     static bool IsAuthed(HttpContext http, AppConfig cfg) =>
         http.Session.GetString("authenticated") == "true" &&
