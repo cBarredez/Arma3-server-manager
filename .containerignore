@@ -1,5 +1,7 @@
 node_modules/
 web/node_modules/
+**/node_modules/
+.git/
 .env
 deploy.toml
 config/manager.secrets.toml
@@ -7,6 +9,9 @@ config/manager.secrets.toml
 .DS_Store
 Thumbs.db
 __pycache__/
+**/__pycache__/
 bin/
 obj/
+**/bin/
+**/obj/
 web/dist/

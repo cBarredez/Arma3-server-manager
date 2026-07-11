@@ -430,9 +430,9 @@ public static class ApiEndpoints
         api.MapGet("/logs", (RuntimeState runtime, int? limit) => Results.Json(runtime.Logs.TakeLast(Math.Min(limit ?? 300, 1000))));
         
         // Server-Sent Events — pushes new log lines and status changes in real time.
-        // The client sends ?since=N where N is the last log index it received.
+        // The client sends ?since=N where N is the last stable log ID it received.
         // Reconnects are handled automatically by the browser EventSource API.
-        api.MapGet("/logs/stream", async (HttpContext http, RuntimeState runtime, CancellationToken ct, int since = 0) =>
+        api.MapGet("/logs/stream", async (HttpContext http, RuntimeState runtime, CancellationToken ct, long since = 0) =>
         {
             http.Response.Headers.ContentType  = "text/event-stream";
             http.Response.Headers.CacheControl = "no-cache";
@@ -442,25 +442,27 @@ public static class ApiEndpoints
             await http.Response.Body.FlushAsync(ct);
         
             var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
-            var lastIndex = Math.Max(0, since);
+            var lastId = Math.Max(0, since);
+            if (long.TryParse(http.Request.Headers["Last-Event-ID"], out var reconnectId))
+                lastId = Math.Max(lastId, reconnectId);
             var wasRunning  = runtime.IsRunning;
+            var nextPing = DateTimeOffset.UtcNow.AddSeconds(15);
         
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    var logs = runtime.Logs;
-        
                     // Send any new log lines
-                    if (logs.Count > lastIndex)
+                    var pending = await runtime.WaitForLogsAfterAsync(lastId, TimeSpan.FromSeconds(15), ct);
+                    if (pending.Count > 0)
                     {
-                        for (var i = lastIndex; i < logs.Count; i++)
+                        foreach (var entry in pending)
                         {
-                            var line = $"data: {JsonSerializer.Serialize(logs[i], json)}\n\n";
+                            var line = $"id: {entry.Id}\ndata: {JsonSerializer.Serialize(entry, json)}\n\n";
                             await http.Response.WriteAsync(line, ct);
+                            lastId = entry.Id;
                         }
                         await http.Response.Body.FlushAsync(ct);
-                        lastIndex = logs.Count;
                     }
         
                     // Send status event when running state changes
@@ -474,13 +476,13 @@ public static class ApiEndpoints
                     }
         
                     // Keep-alive ping every 15 s so proxies don't close the connection
-                    if (lastIndex % 30 == 0)
+                    if (DateTimeOffset.UtcNow >= nextPing)
                     {
                         await http.Response.WriteAsync(": ping\n\n", ct);
                         await http.Response.Body.FlushAsync(ct);
+                        nextPing = DateTimeOffset.UtcNow.AddSeconds(15);
                     }
         
-                    await Task.Delay(300, ct);
                 }
                 catch (OperationCanceledException) { break; }
                 catch { break; }
