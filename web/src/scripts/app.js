@@ -95,7 +95,7 @@ const state = {
 };
 
 const MAX_HISTORY = 30;
-const VIEWS = ['dashboard', 'mods', 'files', 'config', 'logs', 'settings'];
+const VIEWS = ['dashboard', 'mods', 'files', 'config', 'logs', 'rcon', 'settings'];
 
 // ════════════════════════════════════════════════════════════════════════════════
 // BOOTSTRAP — Auth check on load
@@ -175,6 +175,7 @@ function showApp() {
   initSocket();
   initNav();
   initServerControls();
+  initRconControls();
   const requestedView = location.hash.replace('#', '') || localStorage.getItem('a3mgr.view') || 'dashboard';
   loadView(VIEWS.includes(requestedView) ? requestedView : 'dashboard', false);
 }
@@ -224,6 +225,7 @@ function loadView(name, pushState = true) {
     case 'files':     loadFiles(null);  break;
     case 'config':    loadConfig('server.cfg'); break;
     case 'logs':      loadLogs();       break;
+    case 'rcon':      loadRconPlayers(); break;
     case 'settings':  loadSettings();   break;
   }
 }
@@ -428,6 +430,73 @@ function initServerControls() {
     if (infoPort) infoPort.textContent = d.port || '—';
     if (joinAddress) joinAddress.textContent = getJoinAddress(d);
   }).catch(() => {});
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// RCON CONSOLE
+// ════════════════════════════════════════════════════════════════════════════════
+function initRconControls() {
+  if (initRconControls.bound) return;
+  initRconControls.bound = true;
+
+  function rconLog(line) {
+    const out = document.getElementById('rcon-output');
+    out.textContent += `${line}\n`;
+    out.scrollTop = out.scrollHeight;
+  }
+
+  async function sendCommand() {
+    const input = document.getElementById('rcon-command-input');
+    const command = input.value.trim();
+    if (!command) return;
+    rconLog(`> ${command}`);
+    input.value = '';
+    try {
+      const { response } = await POST('/api/server/rcon/command', { command });
+      if (response) rconLog(response);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  document.getElementById('btn-rcon-send').addEventListener('click', sendCommand);
+  document.getElementById('rcon-command-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') sendCommand();
+  });
+  document.getElementById('btn-rcon-refresh-players').addEventListener('click', loadRconPlayers);
+
+  document.getElementById('rcon-players-table').addEventListener('click', async e => {
+    const row = e.target.closest('tr[data-id]');
+    if (!row) return;
+    const playerId = Number(row.dataset.id);
+    if (e.target.closest('.btn-rcon-kick')) {
+      try { await POST('/api/server/rcon/kick', { playerId }); toast(`Kicked player ${playerId}`); loadRconPlayers(); }
+      catch (err) { toast(err.message, 'error'); }
+    }
+    if (e.target.closest('.btn-rcon-ban')) {
+      try { await POST('/api/server/rcon/ban', { playerId, minutes: 60 }); toast(`Banned player ${playerId} for 60 minutes`); loadRconPlayers(); }
+      catch (err) { toast(err.message, 'error'); }
+    }
+  });
+}
+
+async function loadRconPlayers() {
+  const tbody = document.querySelector('#rcon-players-table tbody');
+  try {
+    const players = await GET('/api/server/rcon/players');
+    tbody.innerHTML = players.map(p => `
+      <tr data-id="${p.id}">
+        <td>${p.id}</td>
+        <td>${p.name}${p.lobby ? ' <span class="badge bg-secondary">Lobby</span>' : ''}</td>
+        <td>${p.ip}</td>
+        <td>${p.ping}</td>
+        <td class="text-truncate" style="max-width:180px">${p.guid}</td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-warning btn-rcon-kick" title="Kick"><i class="fa fa-user-slash"></i></button>
+          <button class="btn btn-sm btn-outline-danger btn-rcon-ban" title="Ban 60 min"><i class="fa fa-gavel"></i></button>
+        </td>
+      </tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted">No players connected</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted">${e.message}</td></tr>`;
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════════

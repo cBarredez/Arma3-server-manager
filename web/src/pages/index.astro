@@ -42,6 +42,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
       <li><a href="#files" class="nav-link" data-view="files"><i class="fa fa-folder-open"></i><span>File Manager</span></a></li>
       <li><a href="#config" class="nav-link" data-view="config"><i class="fa fa-sliders"></i><span>Config Editor</span></a></li>
       <li><a href="#logs" class="nav-link" data-view="logs"><i class="fa fa-terminal"></i><span>Server Logs</span></a></li>
+      <li><a href="#rcon" class="nav-link" data-view="rcon"><i class="fa fa-satellite-dish"></i><span>RCON Console</span></a></li>
       <li><a href="#settings" class="nav-link" data-view="settings"><i class="fa fa-gear"></i><span>Settings</span></a></li>
     </ul>
     <div class="sidebar-footer">
@@ -438,6 +439,35 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
             </div>
           </div>
           <pre id="log-output" class="log-box mt-2"></pre>
+        </div>
+      </div>
+
+      <!-- ── RCON ───────────────────────────────────────────────── -->
+      <div id="view-rcon" class="view d-none">
+        <div class="card-panel">
+          <div class="panel-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-satellite-dish me-2"></i>RCON Console</span>
+            <button id="btn-rcon-refresh-players" class="btn btn-sm btn-outline-secondary">
+              <i class="fa fa-rotate me-1"></i>Refresh players
+            </button>
+          </div>
+          <div class="row g-3 mt-1">
+            <div class="col-12 d-flex gap-2">
+              <input id="rcon-command-input" class="form-control" placeholder="say -1 Hello everyone" autocomplete="off" />
+              <button id="btn-rcon-send" class="btn btn-primary text-nowrap"><i class="fa fa-paper-plane me-1"></i>Send</button>
+            </div>
+            <div class="col-12">
+              <pre id="rcon-output" class="log-box"></pre>
+            </div>
+            <div class="col-12">
+              <table class="table table-sm" id="rcon-players-table">
+                <thead>
+                  <tr><th>#</th><th>Name</th><th>IP</th><th>Ping</th><th>GUID</th><th></th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
 
