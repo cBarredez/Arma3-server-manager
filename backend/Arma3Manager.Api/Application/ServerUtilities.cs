@@ -110,3 +110,20 @@ public static class ServerCfgWriter
         await File.WriteAllTextAsync(settings.ServerCfg, text);
     }
 }
+
+/// <summary>Writes or removes the BattlEye RCon config BE discovers under &lt;profiles&gt;/battleye/BEServer.cfg.</summary>
+public static class BattlEyeConfigWriter
+{
+    public static async Task ApplyAsync(ServerPaths paths, AppConfig cfg)
+    {
+        var directory = Path.Combine(paths.ProfilesDir, "battleye");
+        var file = Path.Combine(directory, "BEServer.cfg");
+        if (string.IsNullOrWhiteSpace(cfg.RconPassword))
+        {
+            if (File.Exists(file)) File.Delete(file);
+            return;
+        }
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(file, $"RConPassword {cfg.RconPassword}\nRConPort {cfg.RconPort}\n");
+    }
+}

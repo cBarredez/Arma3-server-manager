@@ -18,6 +18,8 @@ public sealed record AppConfig(
     int ServerQueryPort,
     int BattleEyePort,
     int VonPort,
+    int RconPort,
+    string RconPassword,
     int ServerMaxPlayers,
     string ServerMemoryLimit,
     string NetworkMode,
@@ -66,6 +68,8 @@ public sealed record AppConfig(
             Int(values, "server.query_port", 2303),
             Int(values, "server.battleye_port", 2304),
             Int(values, "server.von_port", 2305),
+            Int(values, "server.rcon_port", 2306),
+            Text(values, "server.rcon_password", ""),
             Int(values, "server.max_players", 40),
             Text(values, "server.memory_limit", "14g"),
             Text(values, "server.network_mode", "bridge"),
@@ -87,9 +91,12 @@ public sealed record AppConfig(
         {
             ("web.port", WebPort), ("server.port", ServerPort),
             ("server.query_port", ServerQueryPort), ("server.battleye_port", BattleEyePort),
-            ("server.von_port", VonPort)
+            ("server.von_port", VonPort), ("server.rcon_port", RconPort)
         })
             if (port is < 1 or > 65535) throw new InvalidDataException($"{name} must be between 1 and 65535");
+        int[] gamePorts = [ServerPort, ServerQueryPort, BattleEyePort, VonPort, RconPort, WebPort];
+        if (gamePorts.Distinct().Count() != gamePorts.Length)
+            throw new InvalidDataException("server.port, server.query_port, server.battleye_port, server.von_port, server.rcon_port and web.port must all be different");
         if (ServerMaxPlayers is < 1 or > 500) throw new InvalidDataException("server.max_players must be between 1 and 500");
         if (string.IsNullOrWhiteSpace(Arma3Dir) || !Path.IsPathRooted(Arma3Dir))
             throw new InvalidDataException("server.arma3_dir must be an absolute path");

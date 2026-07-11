@@ -24,3 +24,8 @@ public sealed record SteamLoginRequest(string Username, string Password);
 public sealed record SteamInputRequest(string Input);
 public sealed record AccountUpdateRequest(string Username, string CurrentPassword, string NewPassword);
 public sealed record PanelAuth(string Username, string PasswordSalt, string PasswordHash);
+public sealed record RconPlayer(int Id, string Guid, string Name, string Ip, int Ping, bool Lobby, bool Verified);
+public sealed record RconCommandRequest(string Command);
+public sealed record RconSayRequest(string Message);
+public sealed record RconKickRequest(int PlayerId, string? Reason);
+public sealed record RconBanRequest(int PlayerId, int Minutes, string? Reason);

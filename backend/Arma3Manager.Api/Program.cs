@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Http.Features;
 var builder = WebApplication.CreateBuilder(args);
 var config = AppConfig.Load(builder.Environment.ContentRootPath);
 var paths = await ServerPaths.DetectAsync(config);
+await BattlEyeConfigWriter.ApplyAsync(paths, config);
 var store = new SqliteStore(Path.Combine(config.Arma3Dir, "manager.sqlite3"));
 await store.InitAsync();
 await store.MigrateJsonStateAsync(paths);
@@ -18,6 +19,7 @@ builder.Services.AddSingleton(paths);
 builder.Services.AddSingleton(store);
 builder.Services.AddSingleton<RuntimeState>();
 builder.Services.AddSingleton<SteamCmdSession>();
+builder.Services.AddSingleton<BattlEyeRconClient>();
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession(options =>
 {
