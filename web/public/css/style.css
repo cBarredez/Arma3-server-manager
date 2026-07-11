@@ -1,21 +1,27 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   Arma 3 Server Manager — Dark Military Theme
+   Arma 3 Server Manager — Flat Dark Theme
+   Single dark-gray surface scale, violet as the only accent, black for
+   maximum-contrast details. No gradients, no glow/pulse animation.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
-  --bg-base     : #0d0a14;
-  --bg-surface  : #171220;
-  --bg-elevated : #211733;
-  --border      : #372750;
-  --text-primary: #f3edf9;
-  --text-muted  : #a99ab8;
-  --accent      : #d0ad12;
-  --accent-dim  : #8f7610;
-  --royal       : #5b2ab2;
-  --royal-dim   : #30195e;
-  --danger      : #f85149;
-  --warning     : #d0ad12;
-  --info        : #58a6ff;
+  --bg          : #18181b;
+  --surface     : #202024;
+  --surface-alt : #28282e;
+  --border      : #333338;
+  --text-primary: #f5f5f7;
+  --text-muted  : #9a9aa3;
+  --accent      : #7c5cff;
+  --accent-dim  : #5b3fd1;
+  --accent-soft : rgba(124, 92, 255, .14);
+  --accent-rgb  : 124, 92, 255;
+  --black       : #000000;
+  --success     : #2fbf71;
+  --success-rgb : 47, 191, 113;
+  --danger      : #ef4444;
+  --danger-rgb  : 239, 68, 68;
+  --warning     : #f2a93b;
+  --warning-rgb : 242, 169, 59;
   --sidebar-w   : 220px;
 }
 
@@ -27,7 +33,7 @@ html, body {
   margin: 0;
   font-family: 'Inter', system-ui, sans-serif;
   font-size: 14px;
-  background: var(--bg-base);
+  background: var(--bg);
   color: var(--text-primary);
 }
 
@@ -38,12 +44,12 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: radial-gradient(ellipse at center, #2a1749 0%, var(--bg-base) 72%);
+  background: var(--bg);
   z-index: 1000;
 }
 
 .login-card {
-  background: var(--bg-surface);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 2.5rem 2rem;
@@ -124,7 +130,7 @@ html, body {
 /* ─── Sidebar ───────────────────────────────────────────────────────────── */
 #sidebar {
   width: var(--sidebar-w);
-  background: var(--bg-surface);
+  background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -173,14 +179,14 @@ html, body {
 .sidebar-nav li a i { width: 18px; text-align: center; font-size: .95rem; }
 
 .sidebar-nav li a:hover {
-  background: var(--bg-elevated);
+  background: var(--surface-alt);
   color: var(--text-primary);
 }
 
 .sidebar-nav li a.active {
   border-left-color: var(--accent);
   color: var(--accent);
-  background: rgba(208, 173, 18, .11);
+  background: var(--accent-soft);
 }
 
 .sidebar-footer {
@@ -210,7 +216,7 @@ html, body {
 
 /* ─── Top Bar ───────────────────────────────────────────────────────────── */
 #topbar {
-  background: var(--bg-surface);
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
   padding: .65rem 1.25rem;
   display: flex;
@@ -233,7 +239,7 @@ html, body {
   cursor: pointer;
   transition: color .15s, background .15s;
 }
-.btn-icon:hover { background: var(--bg-elevated); color: var(--text-primary); }
+.btn-icon:hover { background: var(--surface-alt); color: var(--text-primary); }
 
 /* Status badge */
 #server-status-badge {
@@ -250,18 +256,11 @@ html, body {
   height: 10px;
   border-radius: 50%;
   background: var(--danger);
-  box-shadow: 0 0 6px var(--danger);
   flex-shrink: 0;
 }
 .status-dot.online {
-  background: var(--accent);
-  box-shadow: 0 0 8px var(--accent);
-  animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 6px var(--accent); }
-  50%       { box-shadow: 0 0 14px var(--accent); }
+  background: var(--success);
+  box-shadow: none;
 }
 
 .server-controls { display: flex; gap: .4rem; }
@@ -275,7 +274,7 @@ html, body {
 
 /* ─── Cards / Panels ────────────────────────────────────────────────────── */
 .card-panel {
-  background: var(--bg-surface);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1.25rem;
@@ -290,7 +289,7 @@ html, body {
 
 /* ─── Metric Cards ──────────────────────────────────────────────────────── */
 .metric-card {
-  background: var(--bg-surface);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1rem 1.25rem;
@@ -309,10 +308,13 @@ html, body {
   font-size: 1.2rem;
   flex-shrink: 0;
 }
-.metric-icon.cpu  { background: rgba(56, 139, 253, .15); color: var(--info);    }
-.metric-icon.mem  { background: rgba(63, 185, 80, .15);  color: var(--accent);  }
-.metric-icon.disk { background: rgba(210, 153, 34, .15); color: var(--warning); }
-.metric-icon.temp { background: rgba(248, 81, 73, .15);  color: var(--danger);  }
+.metric-icon.cpu,
+.metric-icon.mem,
+.metric-icon.disk,
+.metric-icon.temp {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 
 .metric-value {
   font-size: 1.5rem;
@@ -321,7 +323,7 @@ html, body {
 }
 
 .metric-subvalue {
-  color: var(--text-secondary);
+  color: var(--text-muted);
   font-size: .74rem;
   line-height: 1.2;
   margin-top: .3rem;
@@ -357,7 +359,7 @@ html, body {
   width: 100%;
 }
 .join-address code {
-  background: var(--bg-base);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--accent);
@@ -373,7 +375,7 @@ html, body {
 
 /* ─── Log / Code areas ──────────────────────────────────────────────────── */
 .log-box {
-  background: var(--bg-base);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: .75rem 1rem;
@@ -390,7 +392,7 @@ html, body {
 .code-editor {
   width: 100%;
   min-height: 420px;
-  background: var(--bg-base);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: .75rem 1rem;
@@ -422,7 +424,7 @@ html, body {
   vertical-align: middle;
 }
 .mod-table tr:last-child td { border-bottom: none; }
-.mod-table tr:hover td { background: var(--bg-elevated); }
+.mod-table tr:hover td { background: var(--surface-alt); }
 
 .mod-name { font-weight: 500; }
 .mod-id   { color: var(--text-muted); font-family: monospace; font-size: .8rem; text-decoration: none; display: inline-block; }
@@ -436,12 +438,12 @@ html, body {
   padding: .75rem;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--bg-base);
+  background: var(--bg);
   margin-bottom: .6rem;
 }
 .modlist-item.active {
-  border-color: rgba(63, 185, 80, .65);
-  background: rgba(63, 185, 80, .08);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 .modlist-main { min-width: 0; }
 .modlist-actions {
@@ -462,7 +464,7 @@ html, body {
   transition: background .1s;
   font-size: .875rem;
 }
-.file-item:hover { background: var(--bg-elevated); }
+.file-item:hover { background: var(--surface-alt); }
 .file-item .fi-icon { color: var(--text-muted); width: 18px; text-align: center; }
 .file-item.is-dir .fi-icon { color: var(--warning); }
 .file-item .fi-name { flex: 1; }
@@ -495,7 +497,7 @@ html, body {
 }
 
 .file-drop-zone.drag-over {
-  background: rgba(56, 139, 253, .1);
+  background: var(--accent-soft);
   border-color: var(--accent);
   color: var(--text-primary);
 }
@@ -508,7 +510,7 @@ html, body {
 
 .saved-preset-file {
   align-items: center;
-  background: var(--bg-base);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   display: flex;
@@ -538,25 +540,29 @@ html, body {
   border-radius: 4px;
   font-size: .85rem;
 }
-.preset-item:hover { background: var(--bg-elevated); }
+.preset-item:hover { background: var(--surface-alt); }
 
-/* ─── Form controls (dark override) ────────────────────────────────────── */
-.form-control, .form-select {
-  background: var(--bg-elevated);
+/* ─── Form controls ─────────────────────────────────────────────────────
+   Prefixed with `body` so these beat Bootstrap's same-named utility
+   classes: Vite injects bootstrap.min.css as a <style> tag AFTER this
+   stylesheet's <link>, so equal-specificity selectors would otherwise
+   lose the cascade to Bootstrap's defaults. */
+body .form-control, body .form-select {
+  background: var(--surface-alt);
   border: 1px solid var(--border);
   color: var(--text-primary);
 }
-.form-control:focus, .form-select:focus {
-  background: var(--bg-elevated);
+body .form-control:focus, body .form-select:focus {
+  background: var(--surface-alt);
   border-color: var(--accent);
   color: var(--text-primary);
-  box-shadow: 0 0 0 .2rem rgba(63, 185, 80, .2);
+  box-shadow: 0 0 0 .2rem rgba(var(--accent-rgb), .25);
 }
-.form-control::placeholder { color: var(--text-muted); }
+body .form-control::placeholder { color: var(--text-muted); }
 
 /* SteamCMD modal */
 .modal-dark {
-  background: var(--bg-surface);
+  background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text-primary);
 }
@@ -573,8 +579,8 @@ html, body {
   margin-bottom: .35rem;
 }
 .steamcmd-input-panel {
-  border: 1px solid rgba(210, 153, 34, .4);
-  background: rgba(210, 153, 34, .08);
+  border: 1px solid rgba(var(--warning-rgb), .4);
+  background: rgba(var(--warning-rgb), .08);
   border-radius: 8px;
   padding: .85rem;
 }
@@ -584,51 +590,48 @@ html, body {
 }
 
 /* Nav tabs override */
-.nav-tabs { border-bottom-color: var(--border); }
-.nav-tabs .nav-link {
+body .nav-tabs { border-bottom-color: var(--border); }
+body .nav-tabs .nav-link {
   color: var(--text-muted);
   border-color: transparent;
   background: none;
   font-size: .875rem;
 }
-.nav-tabs .nav-link:hover { color: var(--text-primary); border-color: transparent; }
-.nav-tabs .nav-link.active {
+body .nav-tabs .nav-link:hover { color: var(--text-primary); border-color: transparent; }
+body .nav-tabs .nav-link.active {
   color: var(--accent);
-  background: var(--bg-elevated);
-  border-color: var(--border) var(--border) var(--bg-elevated);
+  background: var(--surface-alt);
+  border-color: var(--border) var(--border) var(--surface-alt);
 }
 
 /* Buttons */
-.btn-primary   { background: var(--accent);   border-color: var(--accent);   color: #fff; }
-.btn-primary:hover { background: var(--accent-dim); border-color: var(--accent-dim); }
-.btn-outline-primary { color: var(--accent); border-color: var(--accent); }
-.btn-outline-primary:hover { background: var(--accent); color: #fff; }
-.btn-outline-secondary { color: var(--text-muted); border-color: var(--border); }
-.btn-outline-secondary:hover { background: var(--bg-elevated); color: var(--text-primary); border-color: var(--border); }
-.btn-outline-danger { color: var(--danger); border-color: var(--danger); }
-.btn-outline-danger:hover { background: var(--danger); color: #fff; }
-
-/* Badge */
-.badge { font-size: .75rem; }
+body .btn-primary   { background: var(--accent);   border-color: var(--accent);   color: #fff; }
+body .btn-primary:hover { background: var(--accent-dim); border-color: var(--accent-dim); }
+body .btn-outline-primary { color: var(--accent); border-color: var(--accent); }
+body .btn-outline-primary:hover { background: var(--accent); color: #fff; }
+body .btn-outline-secondary { color: var(--text-muted); border-color: var(--border); }
+body .btn-outline-secondary:hover { background: var(--surface-alt); color: var(--text-primary); border-color: var(--border); }
+body .btn-outline-danger { color: var(--danger); border-color: var(--danger); }
+body .btn-outline-danger:hover { background: var(--danger); color: #fff; }
 
 /* Switch */
-.form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
+body .form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
 
 /* Scrollbar (webkit) */
 ::-webkit-scrollbar        { width: 6px; height: 6px; }
-::-webkit-scrollbar-track  { background: var(--bg-base); }
+::-webkit-scrollbar-track  { background: var(--bg); }
 ::-webkit-scrollbar-thumb  { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
 
 /* ─── Toast ─────────────────────────────────────────────────────────────── */
-.toast {
-  background: var(--bg-elevated);
+body .toast {
+  background: var(--surface-alt);
   border: 1px solid var(--border);
   color: var(--text-primary);
   min-width: 260px;
 }
-.toast-header {
-  background: var(--bg-surface);
+body .toast-header {
+  background: var(--surface);
   color: var(--text-primary);
   border-bottom-color: var(--border);
 }
@@ -636,10 +639,10 @@ html, body {
 /* ─── Server Control Card ───────────────────────────────────────────────── */
 .server-control-card {
   border-color: var(--border);
-  background: linear-gradient(135deg, #161b22 0%, #1a2436 100%);
+  background: var(--surface);
 }
 
-/* Glowing ring around the server icon */
+/* Flat ring around the server icon — solid border, no glow/pulse */
 .status-ring {
   width: 64px;
   height: 64px;
@@ -650,27 +653,19 @@ html, body {
   font-size: 1.5rem;
   flex-shrink: 0;
   border: 2px solid var(--border);
-  transition: border-color .4s, box-shadow .4s;
+  transition: border-color .2s, color .2s;
 }
 .status-ring.offline {
   color: var(--text-muted);
   border-color: var(--border);
 }
 .status-ring.online {
-  color: var(--accent);
-  border-color: var(--accent);
-  box-shadow: 0 0 18px rgba(63, 185, 80, .35);
-  animation: ring-pulse 2.5s ease-in-out infinite;
+  color: var(--success);
+  border-color: var(--success);
 }
 .status-ring.busy {
   color: var(--warning);
   border-color: var(--warning);
-  box-shadow: 0 0 14px rgba(210, 153, 34, .4);
-}
-
-@keyframes ring-pulse {
-  0%, 100% { box-shadow: 0 0 12px rgba(63, 185, 80, .25); }
-  50%       { box-shadow: 0 0 28px rgba(63, 185, 80, .55); }
 }
 
 .server-ctrl-title  { font-size: 1.1rem; font-weight: 700; }
@@ -690,43 +685,40 @@ html, body {
   border-radius: 8px;
   min-width: 82px;
   border: 2px solid transparent;
-  transition: transform .1s, box-shadow .2s, opacity .2s;
+  transition: background .15s, color .15s, transform .1s, opacity .2s;
 }
 .btn-ctrl i { font-size: 1.3rem; }
 .btn-ctrl:active { transform: scale(.96); }
 .btn-ctrl:disabled { opacity: .35; cursor: not-allowed; }
 
 .btn-ctrl-start {
-  background: rgba(63, 185, 80, .15);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: rgba(var(--success-rgb), .14);
+  border-color: var(--success);
+  color: var(--success);
 }
 .btn-ctrl-start:not(:disabled):hover {
-  background: var(--accent);
+  background: var(--success);
   color: #fff;
-  box-shadow: 0 0 16px rgba(63, 185, 80, .5);
 }
 
 .btn-ctrl-stop {
-  background: rgba(248, 81, 73, .12);
+  background: rgba(var(--danger-rgb), .14);
   border-color: var(--danger);
   color: var(--danger);
 }
 .btn-ctrl-stop:not(:disabled):hover {
   background: var(--danger);
   color: #fff;
-  box-shadow: 0 0 16px rgba(248, 81, 73, .5);
 }
 
 .btn-ctrl-restart {
-  background: rgba(210, 153, 34, .12);
+  background: rgba(var(--warning-rgb), .14);
   border-color: var(--warning);
   color: var(--warning);
 }
 .btn-ctrl-restart:not(:disabled):hover {
   background: var(--warning);
   color: #fff;
-  box-shadow: 0 0 16px rgba(210, 153, 34, .5);
 }
 
 /* Action feedback bar */

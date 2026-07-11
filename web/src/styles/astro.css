@@ -3,15 +3,5 @@
 }
 
 html {
-  background: #0b0f0c;
-}
-
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.025;
-  z-index: 9998;
-  background-image: repeating-linear-gradient(0deg, transparent 0 3px, #fff 3px 4px);
+  background: #18181b;
 }
