@@ -622,6 +622,14 @@ body .form-control::placeholder { color: var(--text-muted); }
   font-size: .8rem;
   margin-bottom: .35rem;
 }
+
+.danger-zone {
+  border-color: rgba(255, 77, 91, .55);
+}
+
+.factory-reset-modal {
+  border: 1px solid rgba(255, 77, 91, .55);
+}
 .steamcmd-input-panel {
   border: 1px solid rgba(var(--warning-rgb), .4);
   background: rgba(var(--warning-rgb), .08);

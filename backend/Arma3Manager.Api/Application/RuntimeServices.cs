@@ -41,6 +41,10 @@ public sealed class RuntimeState
     static TaskCompletionSource<bool> NewLogSignal() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool IsRunning => process is { HasExited: false };
+    public bool IsMaintenanceBusy
+    {
+        get { lock (queuedTaskKeys) return taskGate.CurrentCount == 0 || queuedTaskKeys.Count > 0; }
+    }
     public int? ProcessId => IsRunning ? process!.Id : null;
 
     public void Start(string file, IEnumerable<string> arguments, string workingDirectory)
@@ -140,6 +144,7 @@ public sealed class SteamCmdSession(ServerPaths paths)
     bool awaitingInput;
     string? lastError;
     readonly List<LogEntry> logs = [];
+    public bool IsRunning => process is { HasExited: false };
     public static object EmptyPublicState() => new { running = false, awaitingInput = false, username = (string?)null, exitCode = (int?)null, lastError = (string?)null, logs = Array.Empty<LogEntry>() };
     public static bool HasCachedLogin(string? expectedUsername = null)
     {

@@ -523,6 +523,31 @@ public static class ApiEndpoints
             http.Session.SetString("authProof", SessionProof.Create(cfg.SessionSecret));
             return Results.Json(new { ok = true, username = updated.Username });
         });
+
+        api.MapPost("/system/factory-reset", async (FactoryResetRequest req, RuntimeState runtime, SteamCmdSession steam, IHostApplicationLifetime lifetime) =>
+        {
+            if (runtime.IsRunning)
+                return Results.Json(new { error = "Stop the game server before factory reset" }, statusCode: 409);
+            if (runtime.IsMaintenanceBusy || steam.IsRunning)
+                return Results.Json(new { error = "Wait for SteamCMD and maintenance tasks to finish" }, statusCode: 409);
+            var auth = await store.GetPanelAuthAsync(cfg);
+            if (!PasswordHasher.Verify(req.CurrentPassword, auth.PasswordSalt, auth.PasswordHash))
+                return Results.Json(new { error = "Current password is incorrect" }, statusCode: 400);
+            if (!string.Equals(req.Confirmation, FactoryResetExecutor.Confirmation, StringComparison.Ordinal))
+                return Results.Json(new { error = $"Confirmation must be exactly: {FactoryResetExecutor.Confirmation}" }, statusCode: 400);
+
+            await FactoryResetExecutor.PrepareAsync(cfg.Arma3Dir);
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(750);
+                lifetime.StopApplication();
+            });
+            return Results.Json(new
+            {
+                accepted = true,
+                message = "Factory reset queued. The API will restart, erase all persistent volume contents, and initialize clean storage."
+            }, statusCode: StatusCodes.Status202Accepted);
+        });
         
         api.MapPost("/steamcmd/factory-reset", (RuntimeState runtime) =>
         {
