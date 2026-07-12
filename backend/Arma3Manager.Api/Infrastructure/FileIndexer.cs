@@ -78,6 +78,12 @@ public static class FileIndexScanner
             {
                 var childFull = Path.Combine(fullPath, Path.GetFileName(childRel));
                 if (!Directory.Exists(childFull)) continue; // removed; will be reconciled once its true parent is re-enumerated
+                if (WorkshopStorage.IsSymbolicLink(childFull))
+                {
+                    var link = new DirectoryInfo(childFull);
+                    upserts.Add(new FileIndexRow(childRel, relPath, link.Name, true, 0, link.CreationTimeUtc, link.LastWriteTimeUtc, scanGen));
+                    continue;
+                }
                 total += Scan(childFull, childRel, known, childrenByParent, scanGen, upserts, visitedDirs, ct);
             }
         }
@@ -92,7 +98,12 @@ public static class FileIndexScanner
                 if (ProtectedFiles.IsProtected(entryRel)) continue;
                 if (Directory.Exists(entry))
                 {
-                    total += Scan(entry, entryRel, known, childrenByParent, scanGen, upserts, visitedDirs, ct);
+                    if (WorkshopStorage.IsSymbolicLink(entry))
+                    {
+                        var link = new DirectoryInfo(entry);
+                        upserts.Add(new FileIndexRow(entryRel, relPath, name, true, 0, link.CreationTimeUtc, link.LastWriteTimeUtc, scanGen));
+                    }
+                    else total += Scan(entry, entryRel, known, childrenByParent, scanGen, upserts, visitedDirs, ct);
                 }
                 else
                 {

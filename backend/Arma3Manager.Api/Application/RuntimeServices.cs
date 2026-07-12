@@ -53,21 +53,29 @@ public sealed class RuntimeState
     public void RunTask(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null)
     {
         var captured = arguments.ToArray();
-        _ = Task.Run(async () =>
+        _ = Task.Run(() => RunTaskAsync(file, captured, kind, onExit));
+    }
+
+    public async Task<int> RunTaskAsync(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null)
+    {
+        var captured = arguments.ToArray();
+        await taskGate.WaitAsync();
+        try
         {
-            await taskGate.WaitAsync();
-            try
-            {
-                using var task = StartProcess(file, captured, Directory.GetCurrentDirectory());
-                Push("system", $"Task {kind} started PID {task.Id}");
-                Push("system", $"Command: {CommandLog.Format(file, RedactSteamArgs(captured))}");
-                await task.WaitForExitAsync();
-                Push("system", $"Task {kind} exited with code {task.ExitCode}");
-                if (onExit is not null) await onExit(task.ExitCode);
-            }
-            catch (Exception exception) { Push("stderr", $"Task {kind} failed: {exception.Message}"); }
-            finally { taskGate.Release(); }
-        });
+            using var task = StartProcess(file, captured, Directory.GetCurrentDirectory());
+            Push("system", $"Task {kind} started PID {task.Id}");
+            Push("system", $"Command: {CommandLog.Format(file, RedactSteamArgs(captured))}");
+            await task.WaitForExitAsync();
+            Push("system", $"Task {kind} exited with code {task.ExitCode}");
+            if (onExit is not null) await onExit(task.ExitCode);
+            return task.ExitCode;
+        }
+        catch (Exception exception)
+        {
+            Push("stderr", $"Task {kind} failed: {exception.Message}");
+            return -1;
+        }
+        finally { taskGate.Release(); }
     }
     static IEnumerable<string> RedactSteamArgs(string[] arguments)
     {

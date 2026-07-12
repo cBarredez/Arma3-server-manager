@@ -99,6 +99,111 @@ public static class PresetParser
     public static List<PresetMod> Parse(string html) => Regex.Matches(html, @"[?&]id=(\d{6,12})").Select(match => match.Groups[1].Value).Distinct().Select(id => new PresetMod($"@{id}", id)).ToList();
 }
 
+public sealed record WorkshopStorageStatus(int DuplicateCopies);
+public sealed record WorkshopStorageRepairResult(int Converted, long ReclaimedBytes);
+
+public static class WorkshopStorage
+{
+    public static string Source(AppConfig config, string workshopId) =>
+        Path.Combine(config.Arma3Dir, "steamapps", "workshop", "content", "107410", workshopId);
+
+    public static string Reference(AppConfig config, string workshopId) =>
+        Path.Combine(config.Arma3Dir, $"@{workshopId}");
+
+    public static bool IsInstalled(AppConfig config, string workshopId) =>
+        Directory.Exists(Source(config, workshopId));
+
+    public static string EnsureReference(AppConfig config, string workshopId)
+    {
+        var source = Source(config, workshopId);
+        if (!Directory.Exists(source)) throw new DirectoryNotFoundException($"Workshop mod {workshopId} is not installed");
+        var target = Reference(config, workshopId);
+        if (Directory.Exists(target)) return IsSymbolicLink(target) ? target : source;
+
+        try
+        {
+            Directory.CreateSymbolicLink(target, source);
+            return target;
+        }
+        catch
+        {
+            // Arma accepts a relative Workshop path. Never duplicate a full mod just because links are unavailable.
+            return source;
+        }
+    }
+
+    public static WorkshopStorageStatus Status(AppConfig config)
+    {
+        var root = Path.Combine(config.Arma3Dir, "steamapps", "workshop", "content", "107410");
+        if (!Directory.Exists(root)) return new(0);
+        var duplicates = Directory.EnumerateDirectories(root)
+            .Select(Path.GetFileName)
+            .Where(id => Regex.IsMatch(id ?? "", @"^\d+$"))
+            .Count(id => Directory.Exists(Reference(config, id!)) && !IsSymbolicLink(Reference(config, id!)));
+        return new(duplicates);
+    }
+
+    public static WorkshopStorageRepairResult RepairDuplicates(AppConfig config)
+    {
+        var root = Path.Combine(config.Arma3Dir, "steamapps", "workshop", "content", "107410");
+        if (!Directory.Exists(root)) return new(0, 0);
+        var converted = 0;
+        long reclaimed = 0;
+
+        foreach (var source in Directory.EnumerateDirectories(root))
+        {
+            var id = Path.GetFileName(source);
+            if (!Regex.IsMatch(id, @"^\d+$")) continue;
+            var target = Reference(config, id);
+            if (!Directory.Exists(target) || IsSymbolicLink(target)) continue;
+            var temporary = target + $".a3mgr-link-{Guid.NewGuid():N}";
+
+            try
+            {
+                Directory.CreateSymbolicLink(temporary, source);
+                var bytes = DirectorySize(target);
+                Directory.Delete(target, true);
+                Directory.Move(temporary, target);
+                reclaimed += bytes;
+                converted++;
+            }
+            catch
+            {
+                if (Directory.Exists(temporary)) Directory.Delete(temporary);
+            }
+        }
+
+        return new(converted, reclaimed);
+    }
+
+    public static void Delete(AppConfig config, string workshopId)
+    {
+        var reference = Reference(config, workshopId);
+        if (Directory.Exists(reference))
+        {
+            if (IsSymbolicLink(reference)) Directory.Delete(reference);
+            else Directory.Delete(reference, true);
+        }
+        var source = Source(config, workshopId);
+        if (Directory.Exists(source)) Directory.Delete(source, true);
+    }
+
+    public static bool IsSymbolicLink(string path)
+    {
+        try { return new DirectoryInfo(path).LinkTarget is not null; }
+        catch { return false; }
+    }
+
+    static long DirectorySize(string path)
+    {
+        long total = 0;
+        foreach (var file in Directory.EnumerateFiles(path)) total += new FileInfo(file).Length;
+        foreach (var directory in Directory.EnumerateDirectories(path))
+            if (!IsSymbolicLink(directory)) total += DirectorySize(directory);
+        return total;
+    }
+}
+
 public static class ServerCfgWriter
 {
     public static async Task ApplyAsync(StartupSettings settings)

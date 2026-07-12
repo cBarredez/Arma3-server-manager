@@ -671,8 +671,8 @@ async function loadMods() {
     const id = document.getElementById('mod-id-input').value.trim();
     if (!id || !/^\d+$/.test(id)) { toast('Enter a valid Workshop ID', 'error'); return; }
     try {
-      await POST('/api/mods/install', { workshopId: id });
-      toast(`Mod ${id} queued for install`);
+      const result = await POST('/api/mods/install', { workshopId: id });
+      toast(result.queued ? `Mod ${id} queued for install` : `Mod ${id} is already installed`);
       document.getElementById('mod-id-input').value = '';
     } catch (e) { handleSteamLoginRequired(e); }
   };
@@ -758,58 +758,15 @@ function renderCreatorDlcs(dlcs) {
 }
 
 async function loadPresetFiles() {
-  const container = document.getElementById('saved-preset-files');
   const select = document.getElementById('saved-preset-select');
-  if (!container) return;
+  if (!select) return;
   try {
     const files = await GET('/api/mods/preset-files');
-    if (select) {
-      select.innerHTML = '<option value="">Saved presets on server</option>' + files.map(file =>
-        `<option value="${escAttr(file.path)}">${escHtml(file.name)}</option>`).join('');
-    }
-    if (!files.length) {
-      container.innerHTML = '<div class="text-muted small">No saved preset HTML files.</div>';
-      return;
-    }
-    container.innerHTML = files.map(file => `
-      <div class="saved-preset-file">
-        <div class="saved-preset-file-name">
-          <strong>${escHtml(file.name)}</strong>
-          <span class="text-muted small">${fmtBytes(file.size)}</span>
-        </div>
-        <div class="d-flex gap-1">
-          <button class="btn btn-sm btn-outline-primary" data-load-preset-file="${escAttr(file.path)}" title="Load saved preset">
-            <i class="fa fa-folder-open"></i>
-          </button>
-          <button class="btn btn-sm btn-outline-danger" data-delete-preset-file="${escAttr(file.path)}" title="Delete saved preset file">
-            <i class="fa fa-trash"></i>
-          </button>
-        </div>
-      </div>`).join('');
-
-    container.querySelectorAll('[data-load-preset-file]').forEach(btn => {
-      btn.onclick = async () => {
-        try {
-          const data = await POST('/api/mods/preset-files/load', { path: btn.dataset.loadPresetFile });
-          showPresetPreview(data.mods, data.savedPath);
-          toast('Preset loaded');
-        } catch (e) { toast(e.message, 'error'); }
-      };
-    });
-
-    container.querySelectorAll('[data-delete-preset-file]').forEach(btn => {
-      btn.onclick = async () => {
-        if (!confirm('Delete this saved HTML preset file? Saved modlists stay in the panel.')) return;
-        try {
-          await DELETE(`/api/mods/preset-files?path=${encodeURIComponent(btn.dataset.deletePresetFile)}`);
-          toast('Preset file deleted');
-          loadPresetFiles();
-        } catch (e) { toast(e.message, 'error'); }
-      };
-    });
+    select.innerHTML = '<option value="">Saved presets on server</option>' + files.map(file =>
+      `<option value="${escAttr(file.path)}">${escHtml(file.name)} (${fmtBytes(file.size)})</option>`).join('');
 
     const loadSaved = document.getElementById('btn-load-saved-preset');
-    if (loadSaved && select) {
+    if (loadSaved) {
       loadSaved.onclick = async () => {
         if (!select.value) { toast('Select a saved preset first', 'warning'); return; }
         try {
@@ -819,8 +776,19 @@ async function loadPresetFiles() {
         } catch (e) { toast(e.message, 'error'); }
       };
     }
+
+    const deleteSaved = document.getElementById('btn-delete-saved-preset');
+    if (deleteSaved) deleteSaved.onclick = async () => {
+      if (!select.value) { toast('Select a saved preset first', 'warning'); return; }
+      if (!confirm('Delete the selected HTML preset? Saved modlists stay available.')) return;
+      try {
+        await DELETE(`/api/mods/preset-files?path=${encodeURIComponent(select.value)}`);
+        toast('Preset file deleted');
+        loadPresetFiles();
+      } catch (e) { toast(e.message, 'error'); }
+    };
   } catch (e) {
-    container.innerHTML = `<div class="text-danger small">${e.message}</div>`;
+    select.innerHTML = `<option value="">${escHtml(e.message)}</option>`;
   }
 }
 
@@ -1067,7 +1035,7 @@ function renderModlists(stateData) {
           <div class="mod-id">${list.mods.length} mods</div>
         </div>
         <div class="modlist-actions">
-          <button class="btn btn-sm btn-outline-primary" data-activate-modlist="${list.id}" title="Activate when server is stopped"><i class="fa fa-toggle-on me-1"></i>Activate</button>
+          <button class="btn btn-sm ${active ? 'btn-success' : 'btn-outline-primary'}" data-activate-modlist="${list.id}" title="Activate when server is stopped" ${active ? 'disabled' : ''}><i class="fa fa-toggle-on me-1"></i>${active ? 'Active' : 'Activate'}</button>
           <button class="btn btn-sm btn-outline-secondary" data-install-missing="${list.id}" title="Install missing mods"><i class="fa fa-download me-1"></i>Missing</button>
           <button class="btn btn-sm btn-outline-danger" data-delete-modlist="${list.id}" title="Delete saved modlist"><i class="fa fa-trash"></i></button>
           <button class="btn btn-sm btn-danger" data-delete-modlist-mods="${list.id}" title="Delete this modlist and its installed mods"><i class="fa fa-broom me-1"></i>Mods</button>
@@ -1079,7 +1047,8 @@ function renderModlists(stateData) {
     btn.onclick = async () => {
       try {
         const result = await PUT(`/api/modlists/${btn.dataset.activateModlist}/activate`, {});
-        toast(result.missing.length ? `Modlist active. ${result.missing.length} mods missing.` : 'Modlist active');
+        const missing = result.missing || [];
+        toast(missing.length ? `Modlist active. ${missing.length} mods missing.` : 'Modlist active');
         loadModlists();
         loadMods();
       } catch (e) { toast(e.message, 'error'); }
@@ -1090,7 +1059,7 @@ function renderModlists(stateData) {
     btn.onclick = async () => {
       try {
         const { queued } = await POST(`/api/modlists/${btn.dataset.installMissing}/install-missing`);
-        toast(`${queued} missing mods queued`);
+        toast(queued ? `${queued} missing mods queued` : 'All mods are already installed');
       } catch (e) { toast(e.message, 'error'); }
     };
   });
@@ -1193,6 +1162,7 @@ function showPresetPreview(mods, savedPath = '') {
       <label for="pm${i}" class="flex-1" style="cursor:pointer">
         <span class="fw-500">${escHtml(m.name)}</span>
         <span class="text-muted ms-2 small">${m.workshopId}</span>
+        <span class="badge ${m.installed ? 'bg-success' : 'bg-secondary'} ms-2">${m.installed ? 'Installed' : 'Missing'}</span>
       </label>
     </div>`).join('');
 
@@ -1223,8 +1193,8 @@ function showPresetPreview(mods, savedPath = '') {
     }));
     if (!selected.length) { toast('No mods selected', 'warning'); return; }
     try {
-      const { queued } = await POST('/api/mods/install-batch', { mods: selected });
-      toast(`${queued} mods queued for installation`);
+      const { queued, alreadyInstalled } = await POST('/api/mods/install-batch', { mods: selected });
+      toast(queued ? `${queued} missing mods queued; ${alreadyInstalled || 0} already installed` : 'All selected mods are already installed');
       panel.classList.add('d-none');
     } catch (e) { handleSteamLoginRequired(e); }
   };

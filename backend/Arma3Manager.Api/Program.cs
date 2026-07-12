@@ -13,8 +13,16 @@ await BattlEyeConfigWriter.ApplyAsync(paths, config);
 var store = new SqliteStore(Path.Combine(config.Arma3Dir, "manager.sqlite3"));
 await store.InitAsync();
 await store.MigrateJsonStateAsync(paths);
+var storageRepair = WorkshopStorage.RepairDuplicates(config);
+await store.NormalizeWorkshopModPathsAsync(config);
+if (storageRepair.Converted > 0)
+    Console.WriteLine($"Optimized {storageRepair.Converted} duplicated mod folders ({storageRepair.ReclaimedBytes} bytes reclaimed)");
 
-builder.WebHost.UseKestrel(options => options.ListenAnyIP(config.WebPort));
+builder.WebHost.UseKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = null;
+    options.ListenAnyIP(config.WebPort);
+});
 builder.Services.AddSingleton(config);
 builder.Services.AddSingleton(paths);
 builder.Services.AddSingleton(store);
@@ -33,7 +41,7 @@ builder.Services.AddSession(options =>
     options.Cookie.SameSite = SameSiteMode.Strict;
     options.IdleTimeout = TimeSpan.FromHours(24);
 });
-builder.Services.Configure<FormOptions>(options => options.MultipartBodyLengthLimit = 500L * 1024 * 1024);
+builder.Services.Configure<FormOptions>(options => options.MultipartBodyLengthLimit = long.MaxValue);
 builder.Services.AddCors(options => options.AddPolicy("frontend", policy =>
 {
     if (string.IsNullOrWhiteSpace(config.FrontendOrigin))

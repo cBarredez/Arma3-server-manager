@@ -114,6 +114,24 @@ public sealed class FileIndexerTests
         Assert.DoesNotContain(modChildren!, i => i.Name == "old.pbo");
     }
 
+    [Fact]
+    public async Task SymbolicLinkContentIsNotCountedTwice()
+    {
+        using var tree = new TemporaryDirectory();
+        var source = Directory.CreateDirectory(Path.Combine(tree.Path, "steamapps", "workshop", "content", "107410", "123456789"));
+        File.WriteAllText(Path.Combine(source.FullName, "mod.pbo"), "0123456789");
+        Directory.CreateSymbolicLink(Path.Combine(tree.Path, "@123456789"), source.FullName);
+        using var db = new TemporaryDirectory();
+        var store = new SqliteStore(Path.Combine(db.Path, "manager.sqlite3"));
+        await store.InitAsync();
+
+        await FileIndexScanner.ScanAsync(tree.Path, store, CancellationToken.None);
+
+        Assert.Equal(10, await store.GetIndexedRootSizeAsync());
+        var root = await store.GetFileIndexChildrenAsync("");
+        Assert.Equal(0, root!.Single(item => item.Name == "@123456789").Size);
+    }
+
     static async Task<long> GetScanGenAsync(string dbPath, string path)
     {
         await using var connection = new SqliteConnection($"Data Source={dbPath}");

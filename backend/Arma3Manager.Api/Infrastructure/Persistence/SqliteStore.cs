@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Arma3Manager.Api.Application;
 using Arma3Manager.Api.Configuration;
 using Arma3Manager.Api.Contracts;
 using Arma3Manager.Api.Domain;
@@ -82,6 +83,11 @@ public sealed class SqliteStore(string dbPath)
         return mods;
     }
     public async Task<List<string>> GetActiveModsAsync() => (await GetModsAsync()).Where(mod => mod.Active).Select(mod => mod.Path).ToList();
+    public async Task<List<Mod>> GetActiveWorkshopModsAsync() => (await GetModsAsync())
+        .Where(mod => mod.Active && !string.IsNullOrWhiteSpace(mod.WorkshopId))
+        .GroupBy(mod => mod.WorkshopId, StringComparer.Ordinal)
+        .Select(group => group.First())
+        .ToList();
     public async Task<Mod?> SetModActiveAsync(string id, bool active)
     {
         var mods = await GetModsAsync(); var mod = mods.FirstOrDefault(item => item.Id == id); if (mod is null) return null;
@@ -90,6 +96,22 @@ public sealed class SqliteStore(string dbPath)
     public async Task UpsertModAsync(Mod mod)
     {
         var mods = await GetModsAsync(); mods.RemoveAll(item => item.WorkshopId == mod.WorkshopId || Path.GetFullPath(item.Path) == Path.GetFullPath(mod.Path)); mods.Add(mod); await ReplaceModsAsync(mods);
+    }
+    public async Task NormalizeWorkshopModPathsAsync(AppConfig config)
+    {
+        var mods = await GetModsAsync();
+        var workshopIds = mods.Where(mod => !string.IsNullOrWhiteSpace(mod.WorkshopId)).Select(mod => mod.WorkshopId!).ToHashSet(StringComparer.Ordinal);
+        var normalized = mods
+            .Where(mod => mod.WorkshopId is not null || !workshopIds.Contains(Path.GetFileName(mod.Path).TrimStart('@')))
+            .Select(mod => mod.WorkshopId is null || !WorkshopStorage.IsInstalled(config, mod.WorkshopId)
+                ? mod
+                : mod with { Path = Directory.Exists(WorkshopStorage.Reference(config, mod.WorkshopId))
+                    ? WorkshopStorage.Reference(config, mod.WorkshopId)
+                    : WorkshopStorage.Source(config, mod.WorkshopId) })
+            .GroupBy(mod => mod.WorkshopId ?? $"path:{Path.GetFullPath(mod.Path)}")
+            .Select(group => group.First())
+            .ToList();
+        await ReplaceModsAsync(normalized);
     }
     public async Task<Mod?> DeleteModAsync(string id)
     {
@@ -118,11 +140,24 @@ public sealed class SqliteStore(string dbPath)
     }
     public async Task<ModlistState> ActivateModlistAsync(string id)
     {
-        await SetRawStateAsync("active-modlist", id); var state = await GetModlistsAsync(); var active = state.Lists.FirstOrDefault(list => list.Id == id);
-        if (active is not null) { var mods = await GetModsAsync(); var ids = active.Mods.Select(mod => mod.WorkshopId).ToHashSet(); await ReplaceModsAsync(mods.Select(mod => mod.WorkshopId is null ? mod : mod with { Active = ids.Contains(mod.WorkshopId) })); }
-        return state;
+        var state = await GetModlistsAsync();
+        var active = state.Lists.FirstOrDefault(list => list.Id == id);
+        if (active is null) return state;
+        await SetRawStateAsync("active-modlist", id);
+        var mods = await GetModsAsync();
+        var ids = active.Mods.Select(mod => mod.WorkshopId).ToHashSet();
+        await ReplaceModsAsync(mods.Select(mod => mod.WorkshopId is null ? mod : mod with { Active = ids.Contains(mod.WorkshopId) }));
+        return await GetModlistsAsync();
     }
-    public async Task DeleteModlistAsync(string id) { await using var connection = Open(); var command = connection.CreateCommand(); command.CommandText = "delete from modlists where id=$id"; command.Parameters.AddWithValue("$id", id); await command.ExecuteNonQueryAsync(); }
+    public async Task DeleteModlistAsync(string id)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "delete from modlists where id=$id";
+        command.Parameters.AddWithValue("$id", id);
+        await command.ExecuteNonQueryAsync();
+        if (await GetRawStateAsync("active-modlist") == id) await DeleteRawStateAsync("active-modlist");
+    }
     public async Task<int> DeleteModsForModlistAsync(string id)
     {
         var list = (await GetModlistsAsync()).Lists.FirstOrDefault(item => item.Id == id); if (list is null) return 0; var ids = list.Mods.Select(mod => mod.WorkshopId).ToHashSet(); var mods = await GetModsAsync(); var deleting = mods.Where(mod => mod.WorkshopId is not null && ids.Contains(mod.WorkshopId)).ToList();
@@ -143,6 +178,14 @@ public sealed class SqliteStore(string dbPath)
     Task SetRawSettingAsync(string key, string value) => SetRawAsync("settings", key, value);
     Task<string?> GetRawStateAsync(string key) => GetRawAsync("app_state", key);
     Task SetRawStateAsync(string key, string value) => SetRawAsync("app_state", key, value);
+    async Task DeleteRawStateAsync(string key)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "delete from app_state where key=$key";
+        command.Parameters.AddWithValue("$key", key);
+        await command.ExecuteNonQueryAsync();
+    }
     async Task<string?> GetRawAsync(string table, string key) { await using var connection = Open(); var command = connection.CreateCommand(); command.CommandText = $"select value from {table} where key=$key"; command.Parameters.AddWithValue("$key", key); return (string?)await command.ExecuteScalarAsync(); }
     async Task SetRawAsync(string table, string key, string value) { await using var connection = Open(); var command = connection.CreateCommand(); command.CommandText = $"insert into {table}(key,value) values($key,$value) on conflict(key) do update set value=excluded.value"; command.Parameters.AddWithValue("$key", key); command.Parameters.AddWithValue("$value", value); await command.ExecuteNonQueryAsync(); }
 

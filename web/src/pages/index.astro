@@ -288,8 +288,10 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
                   <button id="btn-load-saved-preset" class="btn btn-outline-primary" title="Load selected server preset">
                     <i class="fa fa-folder-open me-1"></i>Load
                   </button>
+                  <button id="btn-delete-saved-preset" class="btn btn-outline-danger" title="Delete selected server preset">
+                    <i class="fa fa-trash"></i>
+                  </button>
                 </div>
-                <div id="saved-preset-files" class="saved-preset-files mt-3"></div>
               </div>
             </div>
           </div>
@@ -309,7 +311,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
           <div class="mt-3 d-flex gap-2">
             <button id="btn-preset-select-all" class="btn btn-sm btn-outline-secondary">Select All</button>
             <button id="btn-install-preset" class="btn btn-sm btn-success">
-              <i class="fa fa-download me-1"></i>Install Selected
+              <i class="fa fa-download me-1"></i>Install Missing
             </button>
           </div>
         </div>
