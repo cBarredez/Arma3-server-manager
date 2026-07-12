@@ -21,6 +21,8 @@ public sealed record CreatorDlc(string Id, string Name, string Folder, string Pa
 public sealed record FileWriteRequest(string Path, string Content);
 public sealed record FileRenameRequest(string Path, string NewName);
 public sealed record ConfigWriteRequest(string File, string Content);
+public sealed record MissionSelectionRequest(string Template);
+public sealed record MissionEntry(string Template, string Name, bool Packed, long Size, DateTime Modified);
 public sealed record SteamLoginRequest(string Username, string Password);
 public sealed record SteamInputRequest(string Input);
 public sealed record AccountUpdateRequest(string Username, string CurrentPassword, string NewPassword);

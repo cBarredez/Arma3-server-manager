@@ -388,6 +388,14 @@ html, body {
   word-break: break-all;
   margin: 0;
 }
+.log-line { display: block; color: #a8b5c8; }
+.log-time { color: #778395; }
+.log-level { font-weight: 700; }
+.log-level.log-error { color: #ff6b72; }
+.log-level.log-warning { color: #f4c95d; }
+.log-level.log-success { color: #65d58a; }
+.log-level.log-system { color: #69b7ff; }
+.log-level.log-output { color: #8996a8; }
 
 .code-editor {
   width: 100%;

@@ -33,6 +33,26 @@ public sealed class ModlistStoreTests
         Assert.Null((await store.GetModlistsAsync()).ActiveModlistId);
     }
 
+    [Fact]
+    public async Task DeactivatingModlistClearsSelectionAndOnlyDisablesItsMods()
+    {
+        using var fixture = new TemporaryDirectory();
+        var store = new SqliteStore(Path.Combine(fixture.Path, "manager.sqlite3"));
+        await store.InitAsync();
+        var firstPath = Path.Combine(fixture.Path, "@100");
+        var unrelatedPath = Path.Combine(fixture.Path, "@300");
+        await store.UpsertModAsync(new("one", "One", firstPath, true, "100"));
+        await store.UpsertModAsync(new("other", "Manual server mod", unrelatedPath, true, null));
+        var list = await store.SaveModlistAsync(new("Active", [new("One", "100")], true));
+
+        var state = await store.DeactivateModlistAsync(list.Id);
+
+        Assert.Null(state.ActiveModlistId);
+        var activePaths = await store.GetActiveModsAsync();
+        Assert.DoesNotContain(firstPath, activePaths);
+        Assert.Contains(unrelatedPath, activePaths);
+    }
+
     sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()

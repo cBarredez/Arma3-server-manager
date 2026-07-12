@@ -216,6 +216,84 @@ public static class ServerCfgWriter
     }
 }
 
+public static class MissionConfig
+{
+    public static MissionEntry[] List(ServerPaths paths)
+    {
+        if (!Directory.Exists(paths.MissionsDir)) return [];
+        var entries = new List<MissionEntry>();
+        foreach (var file in Directory.EnumerateFiles(paths.MissionsDir, "*", SearchOption.TopDirectoryOnly))
+        {
+            if (!file.EndsWith(".pbo", StringComparison.OrdinalIgnoreCase)) continue;
+            var info = new FileInfo(file);
+            var name = info.Name[..^4];
+            entries.Add(new(name, info.Name, true, info.Length, info.LastWriteTimeUtc));
+        }
+        foreach (var directory in Directory.EnumerateDirectories(paths.MissionsDir, "*", SearchOption.TopDirectoryOnly))
+        {
+            var info = new DirectoryInfo(directory);
+            entries.Add(new(info.Name, info.Name, false, 0, info.LastWriteTimeUtc));
+        }
+        return entries
+            .GroupBy(entry => entry.Template, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderByDescending(entry => entry.Packed).First())
+            .OrderBy(entry => entry.Template, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public static string? ReadSelected(string serverCfg)
+    {
+        if (!File.Exists(serverCfg)) return null;
+        var text = File.ReadAllText(serverCfg);
+        if (!TryFindClassBody(text, "Missions", 0, text.Length, out var missionsStart, out var missionsEnd) ||
+            !TryFindClassBody(text, "Mission1", missionsStart, missionsEnd, out var missionStart, out var missionEnd)) return null;
+        var match = Regex.Match(text[missionStart..missionEnd], @"\btemplate\s*=\s*\""([^\""\r\n]+)\""\s*;", RegexOptions.IgnoreCase);
+        return match.Success ? StripPbo(match.Groups[1].Value) : null;
+    }
+
+    public static async Task ApplyAsync(string serverCfg, string template)
+    {
+        template = StripPbo(Path.GetFileName(template.Trim()));
+        if (string.IsNullOrWhiteSpace(template) || template.IndexOfAny(['\"', '\r', '\n']) >= 0)
+            throw new InvalidDataException("Invalid mission template");
+
+        var text = await File.ReadAllTextAsync(serverCfg);
+        if (TryFindClassBody(text, "Missions", 0, text.Length, out var missionsStart, out var missionsEnd) &&
+            TryFindClassBody(text, "Mission1", missionsStart, missionsEnd, out var missionStart, out var missionEnd))
+        {
+            var body = text[missionStart..missionEnd];
+            var pattern = @"\btemplate\s*=\s*\""[^\""\r\n]*\""\s*;";
+            var replacement = $"template = \"{template}\";";
+            body = Regex.IsMatch(body, pattern, RegexOptions.IgnoreCase)
+                ? Regex.Replace(body, pattern, replacement, RegexOptions.IgnoreCase)
+                : $"\n        {replacement}{body}";
+            text = text[..missionStart] + body + text[missionEnd..];
+        }
+        else
+        {
+            text = text.TrimEnd() + $"\n\nclass Missions\n{{\n    class Mission1\n    {{\n        template = \"{template}\";\n        difficulty = \"Custom\";\n    }};\n}};\n";
+        }
+        await File.WriteAllTextAsync(serverCfg, text);
+    }
+
+    static string StripPbo(string value) => value.EndsWith(".pbo", StringComparison.OrdinalIgnoreCase) ? value[..^4] : value;
+
+    static bool TryFindClassBody(string text, string className, int start, int end, out int bodyStart, out int bodyEnd)
+    {
+        var match = Regex.Match(text[start..end], $@"\bclass\s+{Regex.Escape(className)}\b[^{{;]*{{", RegexOptions.IgnoreCase);
+        if (!match.Success) { bodyStart = bodyEnd = -1; return false; }
+        var opening = start + match.Index + match.Length - 1;
+        var depth = 1;
+        for (var i = opening + 1; i < end; i++)
+        {
+            if (text[i] == '{') depth++;
+            else if (text[i] == '}' && --depth == 0) { bodyStart = opening + 1; bodyEnd = i; return true; }
+        }
+        bodyStart = bodyEnd = -1;
+        return false;
+    }
+}
+
 /// <summary>Writes or removes the BattlEye RCon config BE discovers under &lt;profiles&gt;/battleye/BEServer.cfg.</summary>
 public static class BattlEyeConfigWriter
 {

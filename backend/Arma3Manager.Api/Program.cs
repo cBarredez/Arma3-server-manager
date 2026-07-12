@@ -13,6 +13,7 @@ await BattlEyeConfigWriter.ApplyAsync(paths, config);
 var store = new SqliteStore(Path.Combine(config.Arma3Dir, "manager.sqlite3"));
 await store.InitAsync();
 await store.MigrateJsonStateAsync(paths);
+await store.EnsureFileIndexVersionAsync(2);
 var storageRepair = WorkshopStorage.RepairDuplicates(config);
 await store.NormalizeWorkshopModPathsAsync(config);
 if (storageRepair.Converted > 0)

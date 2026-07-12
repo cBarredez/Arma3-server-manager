@@ -1,9 +1,12 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using Arma3Manager.Api.Contracts;
 using Arma3Manager.Api.Domain;
 using Arma3Manager.Api.Infrastructure;
 
 namespace Arma3Manager.Api.Application;
+
+public sealed record TaskRunResult(int ExitCode, IReadOnlyList<string> Output);
 
 /// <summary>Owns the Arma process, serialized maintenance tasks, and bounded in-memory logs.</summary>
 public sealed class RuntimeState
@@ -11,6 +14,7 @@ public sealed class RuntimeState
     Process? process;
     readonly List<LogEntry> logs = [];
     readonly SemaphoreSlim taskGate = new(1, 1);
+    readonly HashSet<string> queuedTaskKeys = new(StringComparer.Ordinal);
     long nextLogId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
     TaskCompletionSource<bool> logSignal = NewLogSignal();
     public IReadOnlyList<LogEntry> Logs
@@ -50,30 +54,48 @@ public sealed class RuntimeState
         if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
         Push("system", "Server stopped");
     }
-    public void RunTask(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null)
+    public bool RunTask(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null, string? dedupeKey = null)
     {
+        var key = dedupeKey ?? kind;
+        lock (queuedTaskKeys)
+        {
+            if (!queuedTaskKeys.Add(key))
+            {
+                Push("system", $"Task {kind} ignored because {key} is already queued or running");
+                return false;
+            }
+        }
         var captured = arguments.ToArray();
-        _ = Task.Run(() => RunTaskAsync(file, captured, kind, onExit));
+        _ = Task.Run(async () =>
+        {
+            try { await RunTaskAsync(file, captured, kind, onExit); }
+            finally { lock (queuedTaskKeys) queuedTaskKeys.Remove(key); }
+        });
+        return true;
     }
 
     public async Task<int> RunTaskAsync(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null)
+        => (await RunTaskCaptureAsync(file, arguments, kind, onExit)).ExitCode;
+
+    public async Task<TaskRunResult> RunTaskCaptureAsync(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null)
     {
         var captured = arguments.ToArray();
+        var output = new ConcurrentQueue<string>();
         await taskGate.WaitAsync();
         try
         {
-            using var task = StartProcess(file, captured, Directory.GetCurrentDirectory());
+            using var task = StartProcess(file, captured, Directory.GetCurrentDirectory(), output.Enqueue);
             Push("system", $"Task {kind} started PID {task.Id}");
             Push("system", $"Command: {CommandLog.Format(file, RedactSteamArgs(captured))}");
             await task.WaitForExitAsync();
             Push("system", $"Task {kind} exited with code {task.ExitCode}");
             if (onExit is not null) await onExit(task.ExitCode);
-            return task.ExitCode;
+            return new(task.ExitCode, output.ToArray());
         }
         catch (Exception exception)
         {
             Push("stderr", $"Task {kind} failed: {exception.Message}");
-            return -1;
+            return new(-1, output.ToArray());
         }
         finally { taskGate.Release(); }
     }
@@ -87,12 +109,12 @@ public sealed class RuntimeState
             yield return redacting ? "***" : argument;
         }
     }
-    Process StartProcess(string file, IEnumerable<string> arguments, string workingDirectory)
+    Process StartProcess(string file, IEnumerable<string> arguments, string workingDirectory, Action<string>? observe = null)
     {
         var child = new Process { StartInfo = new(file) { WorkingDirectory = workingDirectory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true }, EnableRaisingEvents = true };
         foreach (var argument in arguments) child.StartInfo.ArgumentList.Add(argument);
-        child.OutputDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) Push("stdout", eventArgs.Data); };
-        child.ErrorDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) Push("stderr", eventArgs.Data); };
+        child.OutputDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) { observe?.Invoke(eventArgs.Data); Push("stdout", eventArgs.Data); } };
+        child.ErrorDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) { observe?.Invoke(eventArgs.Data); Push("stderr", eventArgs.Data); } };
         child.Start(); child.BeginOutputReadLine(); child.BeginErrorReadLine();
         return child;
     }

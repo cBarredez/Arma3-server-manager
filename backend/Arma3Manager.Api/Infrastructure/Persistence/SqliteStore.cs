@@ -30,6 +30,24 @@ public sealed class SqliteStore(string dbPath)
         """;
         await command.ExecuteNonQueryAsync();
     }
+    public async Task<bool> EnsureFileIndexVersionAsync(int version)
+    {
+        var expected = version.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (await GetRawStateAsync("file-index-version") == expected) return false;
+        await using var connection = Open();
+        await using var transaction = connection.BeginTransaction();
+        var clear = connection.CreateCommand();
+        clear.Transaction = transaction;
+        clear.CommandText = "delete from file_index";
+        await clear.ExecuteNonQueryAsync();
+        var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = "insert into app_state(key,value) values('file-index-version',$version) on conflict(key) do update set value=excluded.value";
+        update.Parameters.AddWithValue("$version", expected);
+        await update.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        return true;
+    }
     public async Task MigrateJsonStateAsync(ServerPaths paths)
     {
         var startup = Path.Combine(paths.Arma3Dir, "startup.json");
@@ -149,6 +167,17 @@ public sealed class SqliteStore(string dbPath)
         await ReplaceModsAsync(mods.Select(mod => mod.WorkshopId is null ? mod : mod with { Active = ids.Contains(mod.WorkshopId) }));
         return await GetModlistsAsync();
     }
+    public async Task<ModlistState> DeactivateModlistAsync(string id)
+    {
+        var state = await GetModlistsAsync();
+        var active = state.Lists.FirstOrDefault(list => list.Id == id);
+        if (active is null || state.ActiveModlistId != id) return state;
+        var ids = active.Mods.Select(mod => mod.WorkshopId).ToHashSet();
+        var mods = await GetModsAsync();
+        await ReplaceModsAsync(mods.Select(mod => mod.WorkshopId is not null && ids.Contains(mod.WorkshopId) ? mod with { Active = false } : mod));
+        await DeleteRawStateAsync("active-modlist");
+        return await GetModlistsAsync();
+    }
     public async Task DeleteModlistAsync(string id)
     {
         await using var connection = Open();
@@ -158,10 +187,15 @@ public sealed class SqliteStore(string dbPath)
         await command.ExecuteNonQueryAsync();
         if (await GetRawStateAsync("active-modlist") == id) await DeleteRawStateAsync("active-modlist");
     }
-    public async Task<int> DeleteModsForModlistAsync(string id)
+    public async Task<List<Mod>> DeleteModsForModlistAsync(string id)
     {
-        var list = (await GetModlistsAsync()).Lists.FirstOrDefault(item => item.Id == id); if (list is null) return 0; var ids = list.Mods.Select(mod => mod.WorkshopId).ToHashSet(); var mods = await GetModsAsync(); var deleting = mods.Where(mod => mod.WorkshopId is not null && ids.Contains(mod.WorkshopId)).ToList();
-        foreach (var mod in deleting) if (Directory.Exists(mod.Path)) Directory.Delete(mod.Path, true); await ReplaceModsAsync(mods.Except(deleting)); return deleting.Count;
+        var list = (await GetModlistsAsync()).Lists.FirstOrDefault(item => item.Id == id);
+        if (list is null) return [];
+        var ids = list.Mods.Select(mod => mod.WorkshopId).ToHashSet();
+        var mods = await GetModsAsync();
+        var deleting = mods.Where(mod => mod.WorkshopId is not null && ids.Contains(mod.WorkshopId)).ToList();
+        await ReplaceModsAsync(mods.Except(deleting));
+        return deleting;
     }
     async Task<List<Mod>> GetModsAsync()
     {
@@ -283,6 +317,35 @@ public sealed class SqliteStore(string dbPath)
         command.CommandText = "select size from file_index where path = ''";
         var result = await command.ExecuteScalarAsync();
         return result is null ? null : Convert.ToInt64(result);
+    }
+
+    public async Task<Dictionary<string, long>> GetIndexedDirectorySizesAsync(string relParent)
+    {
+        var normalized = NormalizeRelative(relParent);
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "select name, size from file_index where parent=$parent and is_dir=1";
+        command.Parameters.AddWithValue("$parent", normalized);
+        var sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) sizes[reader.GetString(0)] = reader.GetInt64(1);
+        return sizes;
+    }
+
+    public async Task<Dictionary<string, long>> GetRootDisplayDirectorySizesAsync()
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        select case when parent = '' then name else '@' || name end as display_name, size, parent
+        from file_index
+        where is_dir = 1 and parent in ('', 'steamapps/workshop/content/107410')
+        order by case when parent = '' then 0 else 1 end
+        """;
+        var sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) sizes[reader.GetString(0)] = reader.GetInt64(1);
+        return sizes;
     }
 
     public async Task RemoveFileIndexForDeletedPathAsync(string relPath)

@@ -395,6 +395,14 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
             <div class="col-md-6"><label class="form-label">Profiles Directory</label><input id="startup-profiles" class="form-control" /></div>
             <div class="col-md-3"><label class="form-label">Max Players</label><input id="startup-max-players" class="form-control" type="number" min="1" max="256" /></div>
             <div class="col-md-3"><label class="form-label">Server Password</label><input id="startup-password" class="form-control" /></div>
+            <div class="col-md-6">
+              <label class="form-label">Startup Mission</label>
+              <div class="input-group">
+                <select id="startup-mission" class="form-select"><option value="">Select a mission from mpmissions</option></select>
+                <button id="btn-refresh-missions" class="btn btn-outline-secondary" type="button" title="Refresh missions"><i class="fa fa-rotate"></i></button>
+                <button id="btn-apply-mission" class="btn btn-primary" type="button"><i class="fa fa-check me-1"></i>Apply</button>
+              </div>
+            </div>
             <div class="col-12"><label class="form-label">Extra Startup Parameters</label><input id="startup-extra" class="form-control" /></div>
             <div class="col-md-6"><label class="form-label">Server-Side Only Mods</label><input id="startup-server-mods" class="form-control" placeholder="@servermod;@another;" /></div>
             <div class="col-md-6"><label class="form-label">Optional Client-Side Mods</label><input id="startup-optional-mods" class="form-control" placeholder="@optional1;@optional2;" /></div>

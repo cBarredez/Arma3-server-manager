@@ -130,6 +130,68 @@ public sealed class FileIndexerTests
         Assert.Equal(10, await store.GetIndexedRootSizeAsync());
         var root = await store.GetFileIndexChildrenAsync("");
         Assert.Equal(0, root!.Single(item => item.Name == "@123456789").Size);
+        var workshopSizes = await store.GetIndexedDirectorySizesAsync("steamapps/workshop/content/107410");
+        Assert.Equal(10, workshopSizes["123456789"]);
+        var displaySizes = await store.GetRootDisplayDirectorySizesAsync();
+        Assert.Equal(10, displaySizes["@123456789"]);
+        Assert.True(displaySizes["steamapps"] >= 10);
+    }
+
+    [Fact]
+    public async Task ExplicitPathRemovalImmediatelyClearsLinkAndWorkshopRows()
+    {
+        using var tree = new TemporaryDirectory();
+        var source = Directory.CreateDirectory(Path.Combine(tree.Path, "steamapps", "workshop", "content", "107410", "123456789"));
+        File.WriteAllText(Path.Combine(source.FullName, "mod.pbo"), "content");
+        Directory.CreateSymbolicLink(Path.Combine(tree.Path, "@123456789"), source.FullName);
+        using var db = new TemporaryDirectory();
+        var store = new SqliteStore(Path.Combine(db.Path, "manager.sqlite3"));
+        await store.InitAsync();
+        await FileIndexScanner.ScanAsync(tree.Path, store, CancellationToken.None);
+
+        await store.RemoveFileIndexForDeletedPathAsync("@123456789");
+        await store.RemoveFileIndexForDeletedPathAsync("steamapps/workshop/content/107410/123456789");
+
+        Assert.DoesNotContain((await store.GetFileIndexChildrenAsync(""))!, item => item.Name == "@123456789");
+        Assert.DoesNotContain((await store.GetFileIndexChildrenAsync("steamapps/workshop/content/107410"))!, item => item.Name == "123456789");
+    }
+
+    [Fact]
+    public async Task InvalidatingChangedParentsForcesAOneTimeLiveListing()
+    {
+        using var tree = new TemporaryDirectory();
+        Directory.CreateDirectory(Path.Combine(tree.Path, "steamapps", "workshop", "content", "107410"));
+        using var db = new TemporaryDirectory();
+        var store = new SqliteStore(Path.Combine(db.Path, "manager.sqlite3"));
+        await store.InitAsync();
+        await FileIndexScanner.ScanAsync(tree.Path, store, CancellationToken.None);
+
+        Assert.NotNull(await store.GetFileIndexChildrenAsync(""));
+        Assert.NotNull(await store.GetFileIndexChildrenAsync("steamapps/workshop/content/107410"));
+
+        await store.InvalidateFileIndexDirAsync("");
+        await store.InvalidateFileIndexDirAsync("steamapps/workshop/content/107410");
+
+        Assert.Null(await store.GetFileIndexChildrenAsync(""));
+        Assert.Null(await store.GetFileIndexChildrenAsync("steamapps/workshop/content/107410"));
+    }
+
+    [Fact]
+    public async Task IndexVersionChangeClearsLegacyRowsOnlyOnce()
+    {
+        using var tree = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tree.Path, "large.pbo"), "content");
+        using var db = new TemporaryDirectory();
+        var store = new SqliteStore(Path.Combine(db.Path, "manager.sqlite3"));
+        await store.InitAsync();
+        await FileIndexScanner.ScanAsync(tree.Path, store, CancellationToken.None);
+        Assert.NotNull(await store.GetIndexedRootSizeAsync());
+
+        Assert.True(await store.EnsureFileIndexVersionAsync(2));
+        Assert.Null(await store.GetIndexedRootSizeAsync());
+        await FileIndexScanner.ScanAsync(tree.Path, store, CancellationToken.None);
+        Assert.False(await store.EnsureFileIndexVersionAsync(2));
+        Assert.Equal(7, await store.GetIndexedRootSizeAsync());
     }
 
     static async Task<long> GetScanGenAsync(string dbPath, string path)

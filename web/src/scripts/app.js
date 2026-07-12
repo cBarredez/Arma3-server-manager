@@ -134,8 +134,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   window.addEventListener('hashchange', () => {
-    const view = location.hash.replace('#', '');
-    if (VIEWS.includes(view) && state.view !== view) loadView(view, false);
+    const route = routeFromHash();
+    if (!VIEWS.includes(route.view)) return;
+    if (state.view !== route.view) loadView(route.view, false, route.filePath || null);
+    else if (route.view === 'files') loadFiles(route.filePath || null, false);
   });
 
   document.querySelectorAll('a[href="/auth/steam"]').forEach(a => {
@@ -194,8 +196,9 @@ function showApp() {
   initNav();
   initServerControls();
   initRconControls();
-  const requestedView = location.hash.replace('#', '') || localStorage.getItem('a3mgr.view') || 'dashboard';
-  loadView(VIEWS.includes(requestedView) ? requestedView : 'dashboard', false);
+  const route = routeFromHash();
+  const requestedView = route.view || localStorage.getItem('a3mgr.view') || 'dashboard';
+  loadView(VIEWS.includes(requestedView) ? requestedView : 'dashboard', false, route.filePath || null);
 }
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
@@ -221,7 +224,7 @@ function initNav() {
 
 }
 
-function loadView(name, pushState = true) {
+function loadView(name, pushState = true, filePath = null) {
   if (!VIEWS.includes(name)) name = 'dashboard';
   document.querySelectorAll('.view').forEach(v => v.classList.add('d-none'));
   document.querySelectorAll('[data-view]').forEach(l => l.classList.remove('active'));
@@ -235,12 +238,12 @@ function loadView(name, pushState = true) {
     name.charAt(0).toUpperCase() + name.slice(1).replace('-', ' ');
   state.view = name;
   localStorage.setItem('a3mgr.view', name);
-  if (pushState && location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
+  if (pushState && location.hash !== `#${name}`) history.pushState({ view: name }, '', `#${name}`);
 
   switch (name) {
     case 'dashboard': initDashboard();  break;
     case 'mods':      loadMods();       break;
-    case 'files':     loadFiles(null);  break;
+    case 'files':     loadFiles(filePath);  break;
     case 'config':    loadConfig('server.cfg'); break;
     case 'logs':      loadLogs();       break;
     case 'rcon':      loadRconPlayers(); break;
@@ -543,12 +546,22 @@ function initDashboard() {
 
   initChart();
 
-  document.getElementById('btn-install-server').addEventListener('click', async () => {
+  document.getElementById('btn-install-server').onclick = async event => {
+    const button = event.currentTarget;
+    if (button.disabled) return;
+    const original = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<i class="fa fa-spinner fa-spin me-1"></i>Starting...';
     try {
       await POST('/api/server/install');
+      loadView('logs');
       toast('Server installation started…', 'success');
     } catch (e) { handleSteamLoginRequired(e); }
-  });
+    finally {
+      button.disabled = false;
+      button.innerHTML = original;
+    }
+  };
 }
 
 function getJoinAddress(status) {
@@ -792,6 +805,16 @@ async function loadPresetFiles() {
   }
 }
 
+function routeFromHash() {
+  const raw = location.hash.replace(/^#/, '');
+  const separator = raw.indexOf('/');
+  const view = separator < 0 ? raw : raw.slice(0, separator);
+  const encodedPath = separator < 0 ? '' : raw.slice(separator + 1);
+  let filePath = '';
+  try { filePath = decodeURIComponent(encodedPath); } catch { filePath = ''; }
+  return { view, filePath };
+}
+
 async function openSteamCmdModal(prefillUser) {
   initSteamCmdControls();
   const modalEl = document.getElementById('steamcmd-modal');
@@ -992,9 +1015,7 @@ async function resetSteamCmd(btn) {
 function appendSteamCmdLog(entry) {
   const el = document.getElementById('steamcmd-log');
   if (!el) return;
-  const prefix = entry.type === 'stderr' ? '[ERR] ' : entry.type === 'system' ? '[SYS] ' : '';
-  el.textContent += prefix + entry.data;
-  if (!entry.data.endsWith('\n')) el.textContent += '\n';
+  el.appendChild(createLogLine(entry, false));
   el.scrollTop = el.scrollHeight;
 }
 
@@ -1035,7 +1056,7 @@ function renderModlists(stateData) {
           <div class="mod-id">${list.mods.length} mods</div>
         </div>
         <div class="modlist-actions">
-          <button class="btn btn-sm ${active ? 'btn-success' : 'btn-outline-primary'}" data-activate-modlist="${list.id}" title="Activate when server is stopped" ${active ? 'disabled' : ''}><i class="fa fa-toggle-on me-1"></i>${active ? 'Active' : 'Activate'}</button>
+          <button class="btn btn-sm ${active ? 'btn-outline-warning' : 'btn-outline-primary'}" ${active ? 'data-deactivate-modlist' : 'data-activate-modlist'}="${list.id}" title="${active ? 'Deactivate' : 'Activate'} when server is stopped"><i class="fa fa-toggle-${active ? 'off' : 'on'} me-1"></i>${active ? 'Deactivate' : 'Activate'}</button>
           <button class="btn btn-sm btn-outline-secondary" data-install-missing="${list.id}" title="Install missing mods"><i class="fa fa-download me-1"></i>Missing</button>
           <button class="btn btn-sm btn-outline-danger" data-delete-modlist="${list.id}" title="Delete saved modlist"><i class="fa fa-trash"></i></button>
           <button class="btn btn-sm btn-danger" data-delete-modlist-mods="${list.id}" title="Delete this modlist and its installed mods"><i class="fa fa-broom me-1"></i>Mods</button>
@@ -1049,6 +1070,17 @@ function renderModlists(stateData) {
         const result = await PUT(`/api/modlists/${btn.dataset.activateModlist}/activate`, {});
         const missing = result.missing || [];
         toast(missing.length ? `Modlist active. ${missing.length} mods missing.` : 'Modlist active');
+        loadModlists();
+        loadMods();
+      } catch (e) { toast(e.message, 'error'); }
+    };
+  });
+
+  container.querySelectorAll('[data-deactivate-modlist]').forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        await PUT(`/api/modlists/${btn.dataset.deactivateModlist}/deactivate`, {});
+        toast('Modlist deactivated');
         loadModlists();
         loadMods();
       } catch (e) { toast(e.message, 'error'); }
@@ -1203,7 +1235,7 @@ function showPresetPreview(mods, savedPath = '') {
 // ════════════════════════════════════════════════════════════════════════════════
 // FILE MANAGER
 // ════════════════════════════════════════════════════════════════════════════════
-async function loadFiles(dir) {
+async function loadFiles(dir, pushHistory = false) {
   const container = document.getElementById('file-list');
   container.innerHTML = '<div class="text-muted"><i class="fa fa-spinner fa-spin me-2"></i>Loading…</div>';
   try {
@@ -1212,6 +1244,10 @@ async function loadFiles(dir) {
     state.fileItems = data.items || [];
     renderBreadcrumb(data.path || '', data.rootName || 'Arma 3 Server');
     renderCurrentFileView();
+    if (pushHistory) {
+      const route = data.path ? `#files/${encodeURIComponent(data.path)}` : '#files';
+      if (location.hash !== route) history.pushState({ view: 'files', filePath: data.path || '' }, '', route);
+    }
   } catch (e) {
     container.innerHTML = `<div class="text-danger">${e.message}</div>`;
   }
@@ -1293,7 +1329,7 @@ function renderBreadcrumb(relPath, rootName = 'Arma 3 Server') {
   }).join('');
 
   list.querySelectorAll('[data-nav-path]').forEach(a => {
-    a.addEventListener('click', e => { e.preventDefault(); loadFiles(a.dataset.navPath); });
+    a.addEventListener('click', e => { e.preventDefault(); loadFiles(a.dataset.navPath, true); });
   });
 }
 
@@ -1362,7 +1398,7 @@ function renderFileTable(items, currentPath) {
 
   container.querySelectorAll('tr.file-item.is-dir').forEach(el => {
     el.addEventListener('click', e => {
-      if (!e.target.closest('.fi-actions')) loadFiles(el.dataset.path);
+      if (!e.target.closest('.fi-actions')) loadFiles(el.dataset.path, true);
     });
   });
 
@@ -1496,6 +1532,29 @@ async function loadStartupSettings() {
     }
   };
 
+  document.getElementById('btn-refresh-missions').onclick = loadMissions;
+  document.getElementById('btn-apply-mission').onclick = async () => {
+    const select = document.getElementById('startup-mission');
+    if (!select.value) return toast('Select a mission first', 'warning');
+    try {
+      await PUT('/api/startup/mission', { template: select.value });
+      toast('Startup mission updated');
+      if (state.currentConfig === 'server.cfg') await loadConfig('server.cfg');
+    } catch (e) { toast(e.message, 'error'); }
+  };
+  await loadMissions();
+
+}
+
+async function loadMissions() {
+  const select = document.getElementById('startup-mission');
+  if (!select) return;
+  try {
+    const { selected, missions } = await GET('/api/missions');
+    select.innerHTML = '<option value="">Select a mission from mpmissions</option>' + missions.map(mission =>
+      `<option value="${escAttr(mission.template)}">${escHtml(mission.template)}${mission.packed ? ' (PBO)' : ''}</option>`).join('');
+    select.value = selected || '';
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 async function downloadCreatorDlcs(btn) {
@@ -1589,13 +1648,15 @@ async function loadLogs() {
   out.textContent = '';
   logCursor = 0;
 
-  document.getElementById('btn-clear-logs').onclick = () => { out.textContent = ''; };
+  document.getElementById('btn-clear-logs').onclick = () => { out.replaceChildren(); };
 
   // Load historical logs first
   try {
     const entries = await GET('/api/logs?limit=300');
     if (entries.length) {
-      out.textContent = entries.map(e => formatLogEntry(e)).join('');
+      const fragment = document.createDocumentFragment();
+      entries.forEach(entry => fragment.appendChild(createLogLine(entry)));
+      out.appendChild(fragment);
       logCursor = Number(entries.at(-1)?.id) || 0;
     }
   } catch (e) { out.textContent = 'Error loading logs: ' + e.message; }
@@ -1638,9 +1699,9 @@ function startLogStream(out) {
   };
 }
 
-function appendLogLine(out, entry) {
-  out.textContent += formatLogEntry(entry);
-  if (document.getElementById('log-autoscroll')?.checked) out.scrollTop = out.scrollHeight;
+function appendLogLine(out, entry, autoscroll = true) {
+  out.appendChild(createLogLine(entry));
+  if (autoscroll && document.getElementById('log-autoscroll')?.checked) out.scrollTop = out.scrollHeight;
 }
 
 function appendLog(entry) {
@@ -1649,10 +1710,37 @@ function appendLog(entry) {
   appendLogLine(out, entry);
 }
 
-function formatLogEntry(e) {
-  const time = new Date(e.ts).toLocaleTimeString();
-  const prefix = e.type === 'stderr' ? '[ERR]' : e.type === 'system' ? '[SYS]' : '[OUT]';
-  return `${time} ${prefix} ${e.data}\n`;
+function createLogLine(entry, includeTime = true) {
+  const severity = logSeverity(entry);
+  const labels = { error: 'ERR', warning: 'WARN', success: 'OK', system: 'SYS', output: 'OUT' };
+  const line = document.createElement('span');
+  line.className = 'log-line';
+  if (includeTime) {
+    const time = document.createElement('span');
+    time.className = 'log-time';
+    time.textContent = `${new Date(entry.ts).toLocaleTimeString()} `;
+    line.appendChild(time);
+  }
+  const level = document.createElement('span');
+  level.className = `log-level log-${severity}`;
+  level.textContent = `[${labels[severity]}]`;
+  line.append(level, document.createTextNode(` ${stripAnsi(entry.data)}\n`));
+  return line;
+}
+
+function stripAnsi(value) {
+  return String(value || '').replace(/[\u001b\u009b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g, '');
+}
+
+function logSeverity(entry) {
+  const text = stripAnsi(entry?.data).toLowerCase();
+  if (/\b(error|failed|failure|fatal|critical|cannot|exception)\b/.test(text)) return 'error';
+  if (/steamcmd\.sh\[\d+\]:\s+(starting|restarting steamcmd by request)/.test(text)) return 'system';
+  if (/\b(warn|warning|advert|busy|retry|no connection|timeout|deprecated)\b/.test(text)) return 'warning';
+  if (entry?.type === 'stderr') return 'warning';
+  if (/\b(success|successful|downloaded|ready|started|connected|complete|completed|ok)\b/.test(text)) return 'success';
+  if (entry?.type === 'system') return 'system';
+  return 'output';
 }
 
 // ─── XSS helpers ─────────────────────────────────────────────────────────────
