@@ -8,6 +8,7 @@ namespace Arma3Manager.Api.Infrastructure;
 /// <summary>Cached CPU and temperature values exposed by the metrics endpoint.</summary>
 public sealed record CpuMetrics(double? Load, double[] Cores);
 public sealed record HostMetricsSample(CpuMetrics Cpu, double? Temperature);
+public sealed record MemoryMetrics(long Total, long Used, long Free, long Cache, long Current, double Percent);
 
 /// <summary>Samples cumulative cgroup counters independently from HTTP polling.</summary>
 public sealed class MetricsSampler(ILogger<MetricsSampler> logger) : BackgroundService
@@ -56,14 +57,30 @@ public static class MetricsReader
     const string DefaultCgroupRoot = "/sys/fs/cgroup";
     static readonly string[] DefaultSysRoots = ["/host-sys", "/sys"];
 
-    public static object ReadMemory()
+    public static MemoryMetrics ReadMemory(string cgroupRoot = DefaultCgroupRoot)
     {
-        var used = ReadLong("/sys/fs/cgroup/memory.current") ?? Process.GetCurrentProcess().WorkingSet64;
-        var total = ReadLong("/sys/fs/cgroup/memory.max") ?? GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-        if (total <= 0) total = used;
+        var current = ReadLong(Path.Combine(cgroupRoot, "memory.current")) ?? Process.GetCurrentProcess().WorkingSet64;
+        var total = ReadLong(Path.Combine(cgroupRoot, "memory.max")) ?? GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        var cache = ReadMemoryStat(cgroupRoot, "inactive_file") ?? 0;
+        cache = Math.Clamp(cache, 0, current);
+        var used = Math.Max(current - cache, 0);
+        if (total <= 0) total = current;
         var free = Math.Max(total - used, 0);
         var percent = total > 0 ? Math.Clamp(Math.Round(used * 100d / total, 1), 0, 100) : 0;
-        return new { total, used, free, percent };
+        return new(total, used, free, cache, current, percent);
+    }
+
+    static long? ReadMemoryStat(string cgroupRoot, string key)
+    {
+        var text = ReadText(Path.Combine(cgroupRoot, "memory.stat"));
+        if (text is null) return null;
+        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var fields = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length == 2 && fields[0] == key && long.TryParse(fields[1], CultureInfo.InvariantCulture, out var value) && value >= 0)
+                return value;
+        }
+        return null;
     }
 
     public static object ReadDisk(string path, string mountLabel)

@@ -99,6 +99,111 @@ public static class PresetParser
     public static List<PresetMod> Parse(string html) => Regex.Matches(html, @"[?&]id=(\d{6,12})").Select(match => match.Groups[1].Value).Distinct().Select(id => new PresetMod($"@{id}", id)).ToList();
 }
 
+public sealed record WorkshopStorageStatus(int DuplicateCopies);
+public sealed record WorkshopStorageRepairResult(int Converted, long ReclaimedBytes);
+
+public static class WorkshopStorage
+{
+    public static string Source(AppConfig config, string workshopId) =>
+        Path.Combine(config.Arma3Dir, "steamapps", "workshop", "content", "107410", workshopId);
+
+    public static string Reference(AppConfig config, string workshopId) =>
+        Path.Combine(config.Arma3Dir, $"@{workshopId}");
+
+    public static bool IsInstalled(AppConfig config, string workshopId) =>
+        Directory.Exists(Source(config, workshopId));
+
+    public static string EnsureReference(AppConfig config, string workshopId)
+    {
+        var source = Source(config, workshopId);
+        if (!Directory.Exists(source)) throw new DirectoryNotFoundException($"Workshop mod {workshopId} is not installed");
+        var target = Reference(config, workshopId);
+        if (Directory.Exists(target)) return IsSymbolicLink(target) ? target : source;
+
+        try
+        {
+            Directory.CreateSymbolicLink(target, source);
+            return target;
+        }
+        catch
+        {
+            // Arma accepts a relative Workshop path. Never duplicate a full mod just because links are unavailable.
+            return source;
+        }
+    }
+
+    public static WorkshopStorageStatus Status(AppConfig config)
+    {
+        var root = Path.Combine(config.Arma3Dir, "steamapps", "workshop", "content", "107410");
+        if (!Directory.Exists(root)) return new(0);
+        var duplicates = Directory.EnumerateDirectories(root)
+            .Select(Path.GetFileName)
+            .Where(id => Regex.IsMatch(id ?? "", @"^\d+$"))
+            .Count(id => Directory.Exists(Reference(config, id!)) && !IsSymbolicLink(Reference(config, id!)));
+        return new(duplicates);
+    }
+
+    public static WorkshopStorageRepairResult RepairDuplicates(AppConfig config)
+    {
+        var root = Path.Combine(config.Arma3Dir, "steamapps", "workshop", "content", "107410");
+        if (!Directory.Exists(root)) return new(0, 0);
+        var converted = 0;
+        long reclaimed = 0;
+
+        foreach (var source in Directory.EnumerateDirectories(root))
+        {
+            var id = Path.GetFileName(source);
+            if (!Regex.IsMatch(id, @"^\d+$")) continue;
+            var target = Reference(config, id);
+            if (!Directory.Exists(target) || IsSymbolicLink(target)) continue;
+            var temporary = target + $".a3mgr-link-{Guid.NewGuid():N}";
+
+            try
+            {
+                Directory.CreateSymbolicLink(temporary, source);
+                var bytes = DirectorySize(target);
+                Directory.Delete(target, true);
+                Directory.Move(temporary, target);
+                reclaimed += bytes;
+                converted++;
+            }
+            catch
+            {
+                if (Directory.Exists(temporary)) Directory.Delete(temporary);
+            }
+        }
+
+        return new(converted, reclaimed);
+    }
+
+    public static void Delete(AppConfig config, string workshopId)
+    {
+        var reference = Reference(config, workshopId);
+        if (Directory.Exists(reference))
+        {
+            if (IsSymbolicLink(reference)) Directory.Delete(reference);
+            else Directory.Delete(reference, true);
+        }
+        var source = Source(config, workshopId);
+        if (Directory.Exists(source)) Directory.Delete(source, true);
+    }
+
+    public static bool IsSymbolicLink(string path)
+    {
+        try { return new DirectoryInfo(path).LinkTarget is not null; }
+        catch { return false; }
+    }
+
+    static long DirectorySize(string path)
+    {
+        long total = 0;
+        foreach (var file in Directory.EnumerateFiles(path)) total += new FileInfo(file).Length;
+        foreach (var directory in Directory.EnumerateDirectories(path))
+            if (!IsSymbolicLink(directory)) total += DirectorySize(directory);
+        return total;
+    }
+}
+
 public static class ServerCfgWriter
 {
     public static async Task ApplyAsync(StartupSettings settings)
@@ -108,6 +213,84 @@ public static class ServerCfgWriter
         if (settings.MaxPlayers is not null) text = Regex.Replace(text, @"maxPlayers\s*=\s*\d+\s*;", $"maxPlayers = {settings.MaxPlayers};");
         if (settings.ServerPassword is not null) text = Regex.Replace(text, @"password\s*=\s*""[^""]*""\s*;", $"password = \"{settings.ServerPassword}\";");
         await File.WriteAllTextAsync(settings.ServerCfg, text);
+    }
+}
+
+public static class MissionConfig
+{
+    public static MissionEntry[] List(ServerPaths paths)
+    {
+        if (!Directory.Exists(paths.MissionsDir)) return [];
+        var entries = new List<MissionEntry>();
+        foreach (var file in Directory.EnumerateFiles(paths.MissionsDir, "*", SearchOption.TopDirectoryOnly))
+        {
+            if (!file.EndsWith(".pbo", StringComparison.OrdinalIgnoreCase)) continue;
+            var info = new FileInfo(file);
+            var name = info.Name[..^4];
+            entries.Add(new(name, info.Name, true, info.Length, info.LastWriteTimeUtc));
+        }
+        foreach (var directory in Directory.EnumerateDirectories(paths.MissionsDir, "*", SearchOption.TopDirectoryOnly))
+        {
+            var info = new DirectoryInfo(directory);
+            entries.Add(new(info.Name, info.Name, false, 0, info.LastWriteTimeUtc));
+        }
+        return entries
+            .GroupBy(entry => entry.Template, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderByDescending(entry => entry.Packed).First())
+            .OrderBy(entry => entry.Template, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public static string? ReadSelected(string serverCfg)
+    {
+        if (!File.Exists(serverCfg)) return null;
+        var text = File.ReadAllText(serverCfg);
+        if (!TryFindClassBody(text, "Missions", 0, text.Length, out var missionsStart, out var missionsEnd) ||
+            !TryFindClassBody(text, "Mission1", missionsStart, missionsEnd, out var missionStart, out var missionEnd)) return null;
+        var match = Regex.Match(text[missionStart..missionEnd], @"\btemplate\s*=\s*\""([^\""\r\n]+)\""\s*;", RegexOptions.IgnoreCase);
+        return match.Success ? StripPbo(match.Groups[1].Value) : null;
+    }
+
+    public static async Task ApplyAsync(string serverCfg, string template)
+    {
+        template = StripPbo(Path.GetFileName(template.Trim()));
+        if (string.IsNullOrWhiteSpace(template) || template.IndexOfAny(['\"', '\r', '\n']) >= 0)
+            throw new InvalidDataException("Invalid mission template");
+
+        var text = await File.ReadAllTextAsync(serverCfg);
+        if (TryFindClassBody(text, "Missions", 0, text.Length, out var missionsStart, out var missionsEnd) &&
+            TryFindClassBody(text, "Mission1", missionsStart, missionsEnd, out var missionStart, out var missionEnd))
+        {
+            var body = text[missionStart..missionEnd];
+            var pattern = @"\btemplate\s*=\s*\""[^\""\r\n]*\""\s*;";
+            var replacement = $"template = \"{template}\";";
+            body = Regex.IsMatch(body, pattern, RegexOptions.IgnoreCase)
+                ? Regex.Replace(body, pattern, replacement, RegexOptions.IgnoreCase)
+                : $"\n        {replacement}{body}";
+            text = text[..missionStart] + body + text[missionEnd..];
+        }
+        else
+        {
+            text = text.TrimEnd() + $"\n\nclass Missions\n{{\n    class Mission1\n    {{\n        template = \"{template}\";\n        difficulty = \"Custom\";\n    }};\n}};\n";
+        }
+        await File.WriteAllTextAsync(serverCfg, text);
+    }
+
+    static string StripPbo(string value) => value.EndsWith(".pbo", StringComparison.OrdinalIgnoreCase) ? value[..^4] : value;
+
+    static bool TryFindClassBody(string text, string className, int start, int end, out int bodyStart, out int bodyEnd)
+    {
+        var match = Regex.Match(text[start..end], $@"\bclass\s+{Regex.Escape(className)}\b[^{{;]*{{", RegexOptions.IgnoreCase);
+        if (!match.Success) { bodyStart = bodyEnd = -1; return false; }
+        var opening = start + match.Index + match.Length - 1;
+        var depth = 1;
+        for (var i = opening + 1; i < end; i++)
+        {
+            if (text[i] == '{') depth++;
+            else if (text[i] == '}' && --depth == 0) { bodyStart = opening + 1; bodyEnd = i; return true; }
+        }
+        bodyStart = bodyEnd = -1;
+        return false;
     }
 }
 

@@ -8,7 +8,10 @@ printf 'window.ARMA3_API_BASE = "%s";\nwindow.ARMA3_REST_ONLY = %s;\n' \
 # Default: api:8080  (bridge / compose DNS)
 # Host networking supplies ARMA3_API_BACKEND from the Podman definition.
 BACKEND="${ARMA3_API_BACKEND:-api:8080}"
-sed "s|__ARMA3_API_BACKEND__|${BACKEND}|g" \
+DNS_RESOLVER="$(awk '/^nameserver / { print $2; exit }' /etc/resolv.conf)"
+DNS_RESOLVER="${DNS_RESOLVER:-127.0.0.11}"
+sed -e "s|__ARMA3_API_BACKEND__|${BACKEND}|g" \
+    -e "s|__DNS_RESOLVER__|${DNS_RESOLVER}|g" \
     /etc/nginx/conf.d/default.conf.template \
     > /etc/nginx/conf.d/default.conf
 

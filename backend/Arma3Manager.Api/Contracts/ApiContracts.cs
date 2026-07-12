@@ -5,7 +5,7 @@ public sealed record Mod(string Id, string Name, string Path, bool Active, strin
 public sealed record SteamAuth(string Username, DateTimeOffset UpdatedAt);
 public sealed record ModlistState(string? ActiveModlistId, List<Modlist> Lists);
 public sealed record Modlist(string Id, string Name, List<PresetMod> Mods, DateTimeOffset CreatedAt);
-public sealed record PresetMod(string Name, string WorkshopId);
+public sealed record PresetMod(string Name, string WorkshopId, bool Installed = false);
 public sealed record LogEntry(string Type, string Data, DateTimeOffset Ts, long Id = 0);
 public sealed record FileItem(string Name, string Path, bool IsDir, long Size, DateTime Modified, DateTime? Created = null);
 public sealed record FileIndexRow(string Path, string Parent, string Name, bool IsDir, long Size, DateTime Created, DateTime MTime, long ScanGen);
@@ -21,6 +21,8 @@ public sealed record CreatorDlc(string Id, string Name, string Folder, string Pa
 public sealed record FileWriteRequest(string Path, string Content);
 public sealed record FileRenameRequest(string Path, string NewName);
 public sealed record ConfigWriteRequest(string File, string Content);
+public sealed record MissionSelectionRequest(string Template);
+public sealed record MissionEntry(string Template, string Name, bool Packed, long Size, DateTime Modified);
 public sealed record SteamLoginRequest(string Username, string Password);
 public sealed record SteamInputRequest(string Input);
 public sealed record AccountUpdateRequest(string Username, string CurrentPassword, string NewPassword);

@@ -25,6 +25,37 @@ public sealed class MetricsTests
     }
 
     [Fact]
+    public void MemoryUsageExcludesReclaimableInactiveFileCache()
+    {
+        using var fixture = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(fixture.Path, "memory.current"), "12000000000\n");
+        File.WriteAllText(Path.Combine(fixture.Path, "memory.max"), "14000000000\n");
+        File.WriteAllText(Path.Combine(fixture.Path, "memory.stat"), "anon 2000000000\ninactive_file 9000000000\nactive_file 500000000\n");
+
+        var memory = MetricsReader.ReadMemory(fixture.Path);
+
+        Assert.Equal(3_000_000_000, memory.Used);
+        Assert.Equal(9_000_000_000, memory.Cache);
+        Assert.Equal(12_000_000_000, memory.Current);
+        Assert.Equal(21.4, memory.Percent);
+    }
+
+    [Fact]
+    public void MemoryUsageNeverBecomesNegativeWhenStatsAreInconsistent()
+    {
+        using var fixture = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(fixture.Path, "memory.current"), "1000\n");
+        File.WriteAllText(Path.Combine(fixture.Path, "memory.max"), "2000\n");
+        File.WriteAllText(Path.Combine(fixture.Path, "memory.stat"), "inactive_file 5000\n");
+
+        var memory = MetricsReader.ReadMemory(fixture.Path);
+
+        Assert.Equal(0, memory.Used);
+        Assert.Equal(1000, memory.Cache);
+        Assert.Equal(0, memory.Percent);
+    }
+
+    [Fact]
     public void CpuQuotaTakesPrecedenceOverCpuSet()
     {
         using var fixture = new TemporaryDirectory();

@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -9,6 +8,8 @@ using Arma3Manager.Api.Domain;
 using Arma3Manager.Api.Infrastructure;
 using Arma3Manager.Api.Infrastructure.Persistence;
 using Arma3Manager.Api.Security;
+using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Net.Http.Headers;
 
 namespace Arma3Manager.Api.Endpoints;
 
@@ -122,6 +123,23 @@ public static class ApiEndpoints
             var mods = await store.GetActiveCreatorDlcPathsAsync(cfg);
             return Results.Json(new { settings, command = CommandBuilder.Build(paths, settings, mods) });
         });
+
+        api.MapGet("/missions", async () =>
+        {
+            var settings = await store.GetStartupAsync(paths, cfg);
+            return Results.Json(new { selected = MissionConfig.ReadSelected(settings.ServerCfg), missions = MissionConfig.List(paths) });
+        });
+
+        api.MapPut("/startup/mission", async (MissionSelectionRequest req, RuntimeState runtime) =>
+        {
+            if (runtime.IsRunning) return Results.Json(new { error = "Stop the game server before changing the mission" }, statusCode: 409);
+            var template = req.Template.EndsWith(".pbo", StringComparison.OrdinalIgnoreCase) ? req.Template[..^4] : req.Template;
+            var mission = MissionConfig.List(paths).FirstOrDefault(item => item.Template.Equals(template, StringComparison.OrdinalIgnoreCase));
+            if (mission is null) return Results.Json(new { error = "Mission not found in mpmissions" }, statusCode: 404);
+            var settings = await store.GetStartupAsync(paths, cfg);
+            await MissionConfig.ApplyAsync(settings.ServerCfg, mission.Template);
+            return Results.Json(new { ok = true, selected = mission.Template });
+        });
         
         api.MapGet("/server/status", async (RuntimeState runtime) =>
         {
@@ -135,16 +153,7 @@ public static class ApiEndpoints
         api.MapPost("/server/start", async (RuntimeState runtime) =>
         {
             if (runtime.IsRunning) return Results.Json(new { error = "Server is already running" }, statusCode: 400);
-            var startup = await store.GetStartupAsync(paths, cfg);
-            var bin = Path.Combine(cfg.Arma3Dir, startup.ServerBinary);
-            if (!cfg.MockServer && !File.Exists(bin))
-                return Results.Json(new { error = "Server binary not found. Please install the server first." }, statusCode: 400);
-            var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
-            var lowercased = ModFileRepair.MakeLowercase(mods);
-            if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
-            await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
-            runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
-            return Results.Json(new { ok = true, pid = runtime.ProcessId, lowercased });
+            return await StartServerAsync(cfg, paths, store, runtime);
         });
 
         api.MapPost("/server/stop", async (RuntimeState runtime, BattlEyeRconClient rcon) =>
@@ -160,13 +169,7 @@ public static class ApiEndpoints
             if (runtime.IsRunning) runtime.Stop();
             await rcon.DisconnectAsync();
             await Task.Delay(1000);
-            var startup = await store.GetStartupAsync(paths, cfg);
-            var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
-            var lowercased = ModFileRepair.MakeLowercase(mods);
-            if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before restart");
-            await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
-            runtime.Start(Path.Combine(cfg.Arma3Dir, startup.ServerBinary), CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
-            return Results.Json(new { ok = true, pid = runtime.ProcessId, lowercased });
+            return await StartServerAsync(cfg, paths, store, runtime);
         });
 
         api.MapPost("/server/rcon/command", async (RconCommandRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
@@ -211,7 +214,8 @@ public static class ApiEndpoints
             if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
             var startup = await store.GetStartupAsync(paths, cfg);
             var args = SteamArgs(cfg, auth, ServerUpdateArgs(cfg, startup));
-            runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "install");
+            if (!runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "install", dedupeKey: "server-maintenance"))
+                return Results.Json(new { error = "A server installation or update is already running" }, statusCode: 409);
             return Results.Json(new { ok = true, message = "Server installation started" });
         });
         
@@ -222,7 +226,8 @@ public static class ApiEndpoints
             if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
             var startup = await store.GetStartupAsync(paths, cfg);
             var args = SteamArgs(cfg, auth, ServerUpdateArgs(cfg, startup));
-            runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "update");
+            if (!runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "update", dedupeKey: "server-maintenance"))
+                return Results.Json(new { error = "A server installation or update is already running" }, statusCode: 409);
             return Results.Json(new { ok = true, message = "Update started" });
         });
         
@@ -232,7 +237,8 @@ public static class ApiEndpoints
             var user = ResolvedSteamUser(cfg, auth);
             if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
             var args = SteamArgs(cfg, auth, CreatorDlcDownloadArgs(cfg));
-            runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "creator-dlcs");
+            if (!runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], "creator-dlcs"))
+                return Results.Json(new { error = "Creator DLC download is already running" }, statusCode: 409);
             return Results.Json(new
             {
                 ok = true,
@@ -274,39 +280,17 @@ public static class ApiEndpoints
         {
             var mod = await store.DeleteModAsync(id);
             if (mod is null) return Results.Json(new { error = "Mod not found" }, statusCode: 404);
-            if (!string.IsNullOrWhiteSpace(mod.Path) && Directory.Exists(mod.Path)) Directory.Delete(mod.Path, true);
+            await DeleteModFilesAndIndexAsync(cfg, store, mod);
             return Results.Json(new { ok = true });
         });
         api.MapPost("/mods/install", async (InstallModRequest req, RuntimeState runtime) =>
         {
-            var auth = await store.GetSteamAuthAsync();
-            var user = ResolvedSteamUser(cfg, auth);
-            if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
             var presetMod = new PresetMod(req.Name ?? $"@{req.WorkshopId}", req.WorkshopId);
-            var args = SteamArgs(cfg, auth, "+workshop_download_item", "107410", req.WorkshopId, "validate");
-            runtime.RunTask(paths.SteamCmd, ["+force_install_dir", cfg.Arma3Dir, .. args, "+quit"], $"mod:{req.WorkshopId}", async _ => await FinalizeWorkshopModsAsync(cfg, store, [presetMod]));
-            return Results.Json(new { ok = true, queued = 1 });
+            return await QueueWorkshopModsAsync(cfg, store, paths, runtime, [presetMod]);
         });
         api.MapPost("/mods/install-batch", async (InstallBatchRequest req, RuntimeState runtime) =>
         {
-            var auth = await store.GetSteamAuthAsync();
-            var user = ResolvedSteamUser(cfg, auth);
-            if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
-            var mods = req.Mods
-                .Where(m => Regex.IsMatch(m.WorkshopId ?? "", @"^\d+$"))
-                .GroupBy(m => m.WorkshopId)
-                .Select(g => g.First())
-                .ToList();
-            if (mods.Count == 0) return Results.Json(new { error = "No valid Workshop IDs" }, statusCode: 400);
-            var taskArgs = new List<string> { "+force_install_dir", cfg.Arma3Dir };
-            taskArgs.AddRange(SteamArgs(cfg, auth));
-            foreach (var mod in mods)
-            {
-                taskArgs.AddRange(["+workshop_download_item", "107410", mod.WorkshopId, "validate"]);
-            }
-            taskArgs.Add("+quit");
-            runtime.RunTask(paths.SteamCmd, taskArgs, $"mods:batch:{mods.Count}", async _ => await FinalizeWorkshopModsAsync(cfg, store, mods));
-            return Results.Json(new { ok = true, queued = mods.Count });
+            return await QueueWorkshopModsAsync(cfg, store, paths, runtime, req.Mods);
         });
         api.MapPost("/mods/preset", async (HttpRequest request) =>
         {
@@ -314,7 +298,7 @@ public static class ApiEndpoints
             if (file is null) return Results.Json(new { error = "preset file required" }, statusCode: 400);
             var savedPath = await PresetFiles.SaveAsync(cfg, file);
             var html = await File.ReadAllTextAsync(savedPath);
-            return Results.Json(new { mods = PresetParser.Parse(html), savedPath = PathGuard.Relative(cfg.Arma3Dir, savedPath) });
+            return Results.Json(new { mods = WithInstallStatus(cfg, PresetParser.Parse(html)), savedPath = PathGuard.Relative(cfg.Arma3Dir, savedPath) });
         });
         
         api.MapGet("/mods/preset-files", () => Results.Json(PresetFiles.List(cfg)));
@@ -322,7 +306,7 @@ public static class ApiEndpoints
         {
             var file = PresetFiles.Resolve(cfg, req.Path);
             var html = await File.ReadAllTextAsync(file);
-            return Results.Json(new { mods = PresetParser.Parse(html), savedPath = PathGuard.Relative(cfg.Arma3Dir, file) });
+            return Results.Json(new { mods = WithInstallStatus(cfg, PresetParser.Parse(html)), savedPath = PathGuard.Relative(cfg.Arma3Dir, file) });
         });
         api.MapDelete("/mods/preset-files", (string path) =>
         {
@@ -333,20 +317,51 @@ public static class ApiEndpoints
         
         api.MapGet("/modlists", async () => Results.Json(await store.GetModlistsAsync()));
         api.MapPost("/modlists", async (ModlistSaveRequest req) => Results.Json(await store.SaveModlistAsync(req)));
-        api.MapPut("/modlists/{id}/activate", async (string id) => Results.Json(await store.ActivateModlistAsync(id)));
-        api.MapPost("/modlists/{id}/install-missing", async (string id) => Results.Json(new { ok = true, queued = 0, id }));
+        api.MapPut("/modlists/{id}/activate", async (string id, RuntimeState runtime) =>
+        {
+            if (runtime.IsRunning) return Results.Json(new { error = "Stop the game server before changing the active modlist" }, statusCode: 409);
+            var state = await store.ActivateModlistAsync(id);
+            var active = state.Lists.FirstOrDefault(list => list.Id == id);
+            if (active is null) return Results.Json(new { error = "Modlist not found" }, statusCode: 404);
+            var missing = WithInstallStatus(cfg, active.Mods).Where(mod => !mod.Installed).ToArray();
+            return Results.Json(new { state.ActiveModlistId, state.Lists, missing });
+        });
+        api.MapPut("/modlists/{id}/deactivate", async (string id, RuntimeState runtime) =>
+        {
+            if (runtime.IsRunning) return Results.Json(new { error = "Stop the game server before changing the active modlist" }, statusCode: 409);
+            var current = await store.GetModlistsAsync();
+            if (current.Lists.All(list => list.Id != id)) return Results.Json(new { error = "Modlist not found" }, statusCode: 404);
+            if (current.ActiveModlistId != id) return Results.Json(new { error = "Modlist is not active" }, statusCode: 409);
+            return Results.Json(await store.DeactivateModlistAsync(id));
+        });
+        api.MapPost("/modlists/{id}/install-missing", async (string id, RuntimeState runtime) =>
+        {
+            var list = (await store.GetModlistsAsync()).Lists.FirstOrDefault(item => item.Id == id);
+            return list is null
+                ? Results.Json(new { error = "Modlist not found" }, statusCode: 404)
+                : await QueueWorkshopModsAsync(cfg, store, paths, runtime, list.Mods);
+        });
         api.MapDelete("/modlists/{id}", async (string id, bool? deleteMods) =>
         {
-            var deletedMods = deleteMods == true ? await store.DeleteModsForModlistAsync(id) : 0;
+            var deleting = deleteMods == true ? await store.DeleteModsForModlistAsync(id) : [];
+            foreach (var mod in deleting) await DeleteModFilesAndIndexAsync(cfg, store, mod);
             await store.DeleteModlistAsync(id);
-            return Results.Json(new { ok = true, deletedMods });
+            return Results.Json(new { ok = true, deletedMods = deleting.Count });
         });
         
         api.MapGet("/files", async (string? path) =>
         {
             var dir = PathGuard.Resolve(cfg.Arma3Dir, path);
             var rel = PathGuard.Relative(cfg.Arma3Dir, dir);
-            var items = await store.GetFileIndexChildrenAsync(rel) ?? await Task.Run(() => LiveListFallback(dir, cfg.Arma3Dir));
+            var indexed = WorkshopStorage.IsSymbolicLink(dir) ? null : await store.GetFileIndexChildrenAsync(rel);
+            var items = indexed ?? await Task.Run(() => LiveListFallback(dir, cfg.Arma3Dir));
+            if (rel.Length == 0)
+            {
+                var directorySizes = await store.GetRootDisplayDirectorySizesAsync();
+                items = items.Select(item => item.IsDir && directorySizes.TryGetValue(item.Name, out var size)
+                    ? item with { Size = size }
+                    : item).ToArray();
+            }
             return Results.Json(new { path = rel, rootName = "Arma 3 Server", items });
         });
         api.MapGet("/files/content", async (string path) =>
@@ -368,16 +383,13 @@ public static class ApiEndpoints
         api.MapPost("/files/upload", async (HttpRequest request, string? dir) =>
         {
             var target = PathGuard.Resolve(cfg.Arma3Dir, dir);
-            foreach (var file in request.Form.Files)
-            {
-                if (ProtectedFiles.IsProtected(file.FileName)) return Results.Json(new { error = "Protected file" }, statusCode: 403);
-                await using var output = File.Create(Path.Combine(target, Path.GetFileName(file.FileName)));
-                await file.CopyToAsync(output);
-            }
+            if (!MediaTypeHeaderValue.TryParse(request.ContentType, out var mediaType) || string.IsNullOrWhiteSpace(mediaType.Boundary.Value))
+                return Results.Json(new { error = "Expected multipart form data" }, statusCode: 400);
+            var uploaded = await StreamUploadsAsync(request, target);
             // Invalidate just this directory's index row so the next listing falls back to a live read until
             // the watchdog's next cycle re-indexes it — keeps the upload visible immediately.
             await store.InvalidateFileIndexDirAsync(PathGuard.Relative(cfg.Arma3Dir, target));
-            return Results.Json(new { ok = true, uploaded = request.Form.Files.Select(f => f.FileName).ToArray() });
+            return Results.Json(new { ok = true, uploaded });
         });
         api.MapDelete("/files", async (string path) =>
         {
@@ -515,7 +527,8 @@ public static class ApiEndpoints
         api.MapPost("/steamcmd/factory-reset", (RuntimeState runtime) =>
         {
             SteamCmdSession.ResetCache();
-            runtime.RunTask(paths.SteamCmd, ["+quit"], "steamcmd-factory-reset");
+            if (!runtime.RunTask(paths.SteamCmd, ["+quit"], "steamcmd-factory-reset"))
+                return Results.Json(new { error = "SteamCMD factory reset is already running" }, statusCode: 409);
             return Results.Json(new { ok = true, message = "SteamCMD reset started" });
         });
         
@@ -606,6 +619,37 @@ public static class ApiEndpoints
         }
         return args.ToArray();
     }
+
+    static List<PresetMod> WithInstallStatus(AppConfig cfg, IEnumerable<PresetMod> mods) => mods
+        .Where(mod => Regex.IsMatch(mod.WorkshopId ?? "", @"^\d+$"))
+        .GroupBy(mod => mod.WorkshopId)
+        .Select(group => group.First() with { Installed = WorkshopStorage.IsInstalled(cfg, group.Key) })
+        .ToList();
+
+    static async Task<IResult> QueueWorkshopModsAsync(AppConfig cfg, SqliteStore store, ServerPaths paths, RuntimeState runtime, IEnumerable<PresetMod> requested)
+    {
+        var mods = WithInstallStatus(cfg, requested);
+        if (mods.Count == 0) return Results.Json(new { error = "No valid Workshop IDs" }, statusCode: 400);
+
+        var installed = mods.Where(mod => mod.Installed).ToList();
+        if (installed.Count > 0) await FinalizeWorkshopModsAsync(cfg, store, installed);
+        var missing = mods.Where(mod => !mod.Installed).ToList();
+        if (missing.Count == 0) return Results.Json(new { ok = true, queued = 0, alreadyInstalled = installed.Count });
+
+        var auth = await store.GetSteamAuthAsync();
+        var user = ResolvedSteamUser(cfg, auth);
+        if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var failed = await DownloadWorkshopModsWithRetriesAsync(cfg, store, paths, runtime, auth, missing, "mods:batch");
+                if (failed.Count > 0) runtime.Push("stderr", $"Workshop mods failed after retries: {string.Join(", ", failed.Select(mod => mod.WorkshopId))}");
+            }
+            catch (Exception exception) { runtime.Push("stderr", $"Workshop download failed: {exception.Message}"); }
+        });
+        return Results.Json(new { ok = true, queued = missing.Count, alreadyInstalled = installed.Count });
+    }
     
     static async Task<int> FinalizeWorkshopModsAsync(AppConfig cfg, SqliteStore store, IEnumerable<PresetMod> mods)
     {
@@ -615,38 +659,153 @@ public static class ApiEndpoints
             .GroupBy(m => m.WorkshopId)
             .Select(g => g.First()))
         {
-            var source = Path.Combine(cfg.Arma3Dir, "steamapps", "workshop", "content", "107410", mod.WorkshopId);
+            var source = WorkshopStorage.Source(cfg, mod.WorkshopId);
             if (!Directory.Exists(source)) continue;
-    
-            var target = Path.Combine(cfg.Arma3Dir, $"@{mod.WorkshopId}");
-            if (!Directory.Exists(target))
-            {
-                try
-                {
-                    Directory.CreateSymbolicLink(target, source);
-                }
-                catch
-                {
-                    CopyDirectory(source, target);
-                }
-            }
-    
-            await store.UpsertModAsync(new Mod(Guid.NewGuid().ToString("n"), string.IsNullOrWhiteSpace(mod.Name) ? $"@{mod.WorkshopId}" : mod.Name, target, true, mod.WorkshopId));
+            var path = WorkshopStorage.EnsureReference(cfg, mod.WorkshopId);
+            await store.UpsertModAsync(new Mod(Guid.NewGuid().ToString("n"), string.IsNullOrWhiteSpace(mod.Name) ? $"@{mod.WorkshopId}" : mod.Name, path, true, mod.WorkshopId));
             completed++;
+        }
+        WorkshopStorage.RepairDuplicates(cfg);
+        await store.NormalizeWorkshopModPathsAsync(cfg);
+        if (completed > 0)
+        {
+            // One completion event per batch: force only affected File Manager listings to read live once.
+            await store.InvalidateFileIndexDirAsync("");
+            await store.InvalidateFileIndexDirAsync("steamapps/workshop/content/107410");
         }
         return completed;
     }
-    
-    static void CopyDirectory(string source, string target)
+
+    static async Task DeleteModFilesAndIndexAsync(AppConfig cfg, SqliteStore store, Mod mod)
     {
-        Directory.CreateDirectory(target);
-        foreach (var file in Directory.EnumerateFiles(source))
+        if (!string.IsNullOrWhiteSpace(mod.WorkshopId))
         {
-            File.Copy(file, Path.Combine(target, Path.GetFileName(file)), overwrite: true);
+            var reference = WorkshopStorage.Reference(cfg, mod.WorkshopId);
+            var source = WorkshopStorage.Source(cfg, mod.WorkshopId);
+            WorkshopStorage.Delete(cfg, mod.WorkshopId);
+            await store.RemoveFileIndexForDeletedPathAsync(PathGuard.Relative(cfg.Arma3Dir, reference));
+            await store.RemoveFileIndexForDeletedPathAsync(PathGuard.Relative(cfg.Arma3Dir, source));
+            return;
         }
-        foreach (var dir in Directory.EnumerateDirectories(source))
+
+        if (string.IsNullOrWhiteSpace(mod.Path)) return;
+        if (Directory.Exists(mod.Path)) Directory.Delete(mod.Path, true);
+        await store.RemoveFileIndexForDeletedPathAsync(PathGuard.Relative(cfg.Arma3Dir, mod.Path));
+    }
+
+    static async Task<List<PresetMod>> DownloadWorkshopModsWithRetriesAsync(
+        AppConfig cfg, SqliteStore store, ServerPaths paths, RuntimeState runtime, SteamAuth? auth,
+        IReadOnlyCollection<PresetMod> requested, string kind)
+    {
+        var mods = requested.GroupBy(mod => mod.WorkshopId).Select(group => group.First()).ToList();
+        var initial = await runtime.RunTaskCaptureAsync(paths.SteamCmd, WorkshopDownloadArgs(cfg, auth, mods), $"{kind}:{mods.Count}");
+        var failed = FailedWorkshopMods(cfg, mods, initial);
+        await FinalizeWorkshopModsAsync(cfg, store, mods.Where(mod => failed.All(item => item.WorkshopId != mod.WorkshopId)));
+
+        var remaining = new List<PresetMod>();
+        foreach (var mod in failed)
         {
-            CopyDirectory(dir, Path.Combine(target, Path.GetFileName(dir)));
+            var downloaded = false;
+            var delays = new[] { 2, 5, 15 };
+            for (var attempt = 0; attempt < delays.Length; attempt++)
+            {
+                runtime.Push("system", $"Workshop {mod.WorkshopId} retry {attempt + 1}/{delays.Length} in {delays[attempt]}s");
+                await Task.Delay(TimeSpan.FromSeconds(delays[attempt]));
+                var result = await runtime.RunTaskCaptureAsync(paths.SteamCmd, WorkshopDownloadArgs(cfg, auth, [mod]), $"{kind}:retry:{mod.WorkshopId}:{attempt + 1}");
+                if (FailedWorkshopMods(cfg, [mod], result).Count != 0) continue;
+                await FinalizeWorkshopModsAsync(cfg, store, [mod]);
+                runtime.Push("system", $"Workshop {mod.WorkshopId} downloaded successfully after retry {attempt + 1}");
+                downloaded = true;
+                break;
+            }
+            if (!downloaded) remaining.Add(mod);
         }
+        return remaining;
+    }
+
+    static string[] WorkshopDownloadArgs(AppConfig cfg, SteamAuth? auth, IEnumerable<PresetMod> mods)
+    {
+        var args = new List<string> { "+force_install_dir", cfg.Arma3Dir };
+        args.AddRange(SteamArgs(cfg, auth));
+        foreach (var mod in mods) args.AddRange(["+workshop_download_item", "107410", mod.WorkshopId, "validate"]);
+        args.Add("+quit");
+        return args.ToArray();
+    }
+
+    static List<PresetMod> FailedWorkshopMods(AppConfig cfg, IEnumerable<PresetMod> mods, TaskRunResult result)
+    {
+        var text = string.Join('\n', result.Output);
+        var failedIds = Regex.Matches(text, @"Download item\s+(\d+)\s+failed", RegexOptions.IgnoreCase)
+            .Select(match => match.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+        var globalFailure = result.ExitCode != 0 && failedIds.Count == 0;
+        return mods.Where(mod => globalFailure || failedIds.Contains(mod.WorkshopId) || !Directory.Exists(WorkshopStorage.Source(cfg, mod.WorkshopId))).ToList();
+    }
+
+    static async Task<List<string>> StreamUploadsAsync(HttpRequest request, string target)
+    {
+        var mediaType = MediaTypeHeaderValue.Parse(request.ContentType!);
+        var boundary = HeaderUtilities.RemoveQuotes(mediaType.Boundary).Value!;
+        var reader = new MultipartReader(boundary, request.Body);
+        var uploaded = new List<string>();
+        MultipartSection? section;
+        while ((section = await reader.ReadNextSectionAsync(request.HttpContext.RequestAborted)) is not null)
+        {
+            if (!ContentDispositionHeaderValue.TryParse(section.ContentDisposition, out var disposition) || !disposition.IsFileDisposition()) continue;
+            var encodedName = disposition.FileNameStar.HasValue ? disposition.FileNameStar : disposition.FileName;
+            var name = Path.GetFileName(HeaderUtilities.RemoveQuotes(encodedName).Value);
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            if (ProtectedFiles.IsProtected(name)) throw new BadHttpRequestException("Protected file", StatusCodes.Status403Forbidden);
+
+            var destination = Path.Combine(target, name);
+            var temporary = Path.Combine(target, $".a3mgr-upload-{Guid.NewGuid():N}");
+            try
+            {
+                await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                    await section.Body.CopyToAsync(output, request.HttpContext.RequestAborted);
+                File.Move(temporary, destination, true);
+                uploaded.Add(name);
+            }
+            finally
+            {
+                if (File.Exists(temporary)) File.Delete(temporary);
+            }
+        }
+        return uploaded;
+    }
+
+    static async Task<IResult> StartServerAsync(AppConfig cfg, ServerPaths paths, SqliteStore store, RuntimeState runtime)
+    {
+        var startup = await store.GetStartupAsync(paths, cfg);
+        var bin = Path.Combine(cfg.Arma3Dir, startup.ServerBinary);
+        if (!cfg.MockServer && !File.Exists(bin))
+            return Results.Json(new { error = "Server binary not found. Please install the server first." }, statusCode: 400);
+
+        var workshopMods = await store.GetActiveWorkshopModsAsync();
+        if (workshopMods.Count > 0)
+        {
+            var auth = await store.GetSteamAuthAsync();
+            var user = ResolvedSteamUser(cfg, auth);
+            if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
+
+            runtime.Push("system", $"Checking updates for {workshopMods.Count} active Workshop mods before server start");
+            var checking = workshopMods.Select(mod => new PresetMod(mod.Name, mod.WorkshopId!)).ToList();
+            var failed = await DownloadWorkshopModsWithRetriesAsync(cfg, store, paths, runtime, auth, checking, "mods:startup-check");
+            if (failed.Count > 0)
+                return Results.Json(new { error = $"SteamCMD could not update: {string.Join(", ", failed.Select(mod => mod.WorkshopId))}. Review Server Logs before starting." }, statusCode: 502);
+            runtime.Push("system", "Active Workshop mods are current and storage is optimized");
+        }
+        else
+        {
+            WorkshopStorage.RepairDuplicates(cfg);
+            await store.NormalizeWorkshopModPathsAsync(cfg);
+        }
+
+        var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
+        var lowercased = ModFileRepair.MakeLowercase(mods);
+        if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
+        await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
+        runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
+        return Results.Json(new { ok = true, pid = runtime.ProcessId, lowercased, checkedMods = workshopMods.Count });
     }
 }
