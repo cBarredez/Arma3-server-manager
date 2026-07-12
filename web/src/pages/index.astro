@@ -526,6 +526,20 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
               </button>
             </div>
           </div>
+          <div class="col-12">
+            <div class="card-panel danger-zone">
+              <div class="panel-header text-danger"><i class="fa fa-triangle-exclamation me-2"></i>Danger Zone</div>
+              <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mt-2">
+                <div>
+                  <div class="fw-semibold">Factory reset all persistent data</div>
+                  <div class="small text-muted">Server files, mods, SQLite state, Steam credentials and session keys will be erased.</div>
+                </div>
+                <button id="btn-open-factory-reset" class="btn btn-danger">
+                  <i class="fa fa-power-off me-1"></i>Factory Reset
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -575,6 +589,38 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
           </button>
         </div>
         <pre id="steamcmd-log" class="log-box mt-2"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Factory Reset Modal -->
+<div class="modal fade" id="factory-reset-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content modal-dark factory-reset-modal">
+      <div class="modal-header">
+        <h5 class="modal-title text-danger"><i class="fa fa-triangle-exclamation me-2"></i>Factory Reset</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="factory-reset-form">
+          <div class="alert alert-danger py-2">This permanently erases every persistent Arma 3 Manager volume. This action cannot be undone.</div>
+          <label class="form-label" for="factory-reset-password">Current panel password</label>
+          <input id="factory-reset-password" class="form-control mb-3" type="password" autocomplete="current-password" />
+          <label class="form-label" for="factory-reset-confirmation">Type <code>RESET ALL ARMA3 DATA</code></label>
+          <input id="factory-reset-confirmation" class="form-control" autocomplete="off" spellcheck="false" />
+        </div>
+        <div id="factory-reset-progress" class="d-none py-4 text-center">
+          <i class="fa fa-spinner fa-spin fa-2x text-danger mb-3"></i>
+          <div class="fw-semibold">Resetting persistent storage</div>
+          <div class="small text-muted mt-1">Waiting for the clean API instance...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button id="btn-confirm-factory-reset" type="button" class="btn btn-danger" disabled>
+          <i class="fa fa-trash-can me-1"></i>Erase Everything
+        </button>
       </div>
     </div>
   </div>

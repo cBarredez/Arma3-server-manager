@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using Arma3Manager.Api.Configuration;
 using Arma3Manager.Api.Contracts;
 using Arma3Manager.Api.Domain;
+using Arma3Manager.Api.Infrastructure;
 
 namespace Arma3Manager.Api.Application;
 
@@ -90,7 +91,7 @@ public static class PresetFiles
 
 public static class ProtectedFiles
 {
-    static readonly HashSet<string> Names = new(StringComparer.OrdinalIgnoreCase) { "manager.sqlite3", "manager.sqlite3-shm", "manager.sqlite3-wal" };
+    static readonly HashSet<string> Names = new(StringComparer.OrdinalIgnoreCase) { "manager.sqlite3", "manager.sqlite3-shm", "manager.sqlite3-wal", FactoryResetExecutor.MarkerName };
     public static bool IsProtected(string relativePath) => Names.Contains(relativePath.Replace('\\', '/').Trim('/'));
 }
 

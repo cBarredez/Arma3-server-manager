@@ -109,6 +109,7 @@ const state = {
   memHistory  : [],
   chart       : null,
   steamCmdModal: null,
+  factoryResetModal: null,
   presetMods  : [],
 };
 
@@ -988,6 +989,67 @@ async function loadSettings() {
     } catch (e) { toast(e.message, 'error'); }
   };
 
+  setupFactoryReset();
+
+}
+
+function setupFactoryReset() {
+  const openBtn = document.getElementById('btn-open-factory-reset');
+  const modalEl = document.getElementById('factory-reset-modal');
+  const password = document.getElementById('factory-reset-password');
+  const confirmation = document.getElementById('factory-reset-confirmation');
+  const confirmBtn = document.getElementById('btn-confirm-factory-reset');
+  if (!openBtn || !modalEl || !password || !confirmation || !confirmBtn) return;
+
+  state.factoryResetModal = state.factoryResetModal || new bootstrap.Modal(modalEl, { backdrop: 'static', keyboard: false });
+  const updateReady = () => {
+    confirmBtn.disabled = !password.value || confirmation.value !== 'RESET ALL ARMA3 DATA';
+  };
+  password.oninput = updateReady;
+  confirmation.oninput = updateReady;
+  openBtn.disabled = state.serverRunning;
+  openBtn.title = state.serverRunning ? 'Stop the game server before factory reset' : '';
+  openBtn.onclick = () => {
+    password.value = '';
+    confirmation.value = '';
+    document.getElementById('factory-reset-form').classList.remove('d-none');
+    document.getElementById('factory-reset-progress').classList.add('d-none');
+    modalEl.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => { button.disabled = false; });
+    updateReady();
+    state.factoryResetModal.show();
+    modalEl.addEventListener('shown.bs.modal', () => password.focus(), { once: true });
+  };
+  confirmBtn.onclick = async () => {
+    if (confirmBtn.disabled) return;
+    confirmBtn.disabled = true;
+    modalEl.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => { button.disabled = true; });
+    try {
+      await POST('/api/system/factory-reset', {
+        currentPassword: password.value,
+        confirmation: confirmation.value,
+      });
+      document.getElementById('factory-reset-form').classList.add('d-none');
+      document.getElementById('factory-reset-progress').classList.remove('d-none');
+      waitForFactoryReset();
+    } catch (e) {
+      toast(e.message, 'error');
+      modalEl.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => { button.disabled = false; });
+      updateReady();
+    }
+  };
+}
+
+async function waitForFactoryReset() {
+  let observedRestart = false;
+  for (let attempt = 0; attempt < 90; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const response = await fetch(apiUrl('/api/health'), { cache: 'no-store' });
+      if (!response.ok) { observedRestart = true; continue; }
+      if (observedRestart) { window.location.assign('/'); return; }
+    } catch { observedRestart = true; }
+  }
+  toast('The reset is still running. Reload the page after the API restarts.', 'warning');
 }
 
 async function resetSteamCmd(btn) {

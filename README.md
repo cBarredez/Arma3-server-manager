@@ -115,6 +115,29 @@ Volúmenes persistentes:
 
 Eliminar o recrear contenedores no elimina estos volúmenes.
 
+### Restablecimiento total desde la API
+
+El endpoint autenticado `POST /api/system/factory-reset` elimina todo el
+contenido persistente administrado por la aplicación: servidor, mods, SQLite,
+credenciales SteamCMD, configuración de Steam y claves de sesión. Requiere que
+el servidor de juego y todas las tareas de mantenimiento estén detenidos.
+
+```json
+{
+  "currentPassword": "contraseña-actual-del-panel",
+  "confirmation": "RESET ALL ARMA3 DATA"
+}
+```
+
+La solicitud crea un marcador atómico y reinicia Kestrel. Antes de abrir
+SQLite durante el siguiente arranque, el backend vacía los cuatro volúmenes y
+sólo elimina el marcador cuando todas las operaciones terminan correctamente.
+Si el proceso se interrumpe, el siguiente arranque vuelve a intentarlo.
+
+La imagen del contenedor es inmutable y no almacena mods ni estado del panel;
+por eso no se concede acceso al socket root de Podman desde la API. Para usar
+una versión nueva de la imagen, ejecuta el despliegue normal después del reset.
+
 ## Despliegue remoto
 
 Crea la configuración local de destinos:
