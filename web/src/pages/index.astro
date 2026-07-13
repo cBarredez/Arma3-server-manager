@@ -342,6 +342,9 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
           <div class="panel-header d-flex justify-content-between align-items-center">
             <span><i class="fa fa-folder-open me-2"></i>File Manager</span>
             <div class="d-flex gap-2">
+              <button id="btn-refresh-files" class="btn btn-sm btn-outline-secondary" type="button" title="Sync this folder with disk">
+                <i class="fa fa-rotate"></i>
+              </button>
               <label class="btn btn-sm btn-outline-primary mb-0">
                 <i class="fa fa-upload me-1"></i>Upload
                 <input type="file" id="file-upload-input" class="d-none" multiple />
@@ -527,6 +530,20 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
             </div>
           </div>
           <div class="col-12">
+            <div class="card-panel">
+              <div class="panel-header"><i class="fa fa-rotate-right me-2"></i>Panel Container</div>
+              <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mt-2">
+                <div>
+                  <div class="fw-semibold">Restart the manager container</div>
+                  <div class="small text-muted">Restarts the panel process only. Mods, config, and server files are untouched. The game server must be stopped first.</div>
+                </div>
+                <button id="btn-open-restart-app" class="btn btn-outline-warning">
+                  <i class="fa fa-rotate-right me-1"></i>Restart Panel
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="col-12">
             <div class="card-panel danger-zone">
               <div class="panel-header text-danger"><i class="fa fa-triangle-exclamation me-2"></i>Danger Zone</div>
               <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mt-2">
@@ -620,6 +637,36 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
         <button id="btn-confirm-factory-reset" type="button" class="btn btn-danger" disabled>
           <i class="fa fa-trash-can me-1"></i>Erase Everything
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Restart Panel Modal -->
+<div class="modal fade" id="restart-app-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content modal-dark">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-rotate-right me-2"></i>Restart Panel</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="restart-app-form">
+          <div class="alert alert-warning py-2">Restarts the manager container only. No files, mods, or configuration are deleted.</div>
+          <label class="form-label" for="restart-app-password">Current panel password</label>
+          <input id="restart-app-password" class="form-control" type="password" autocomplete="current-password" />
+        </div>
+        <div id="restart-app-progress" class="d-none py-4 text-center">
+          <i class="fa fa-spinner fa-spin fa-2x text-warning mb-3"></i>
+          <div class="fw-semibold">Restarting panel</div>
+          <div class="small text-muted mt-1">Waiting for the panel to come back up...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button id="btn-confirm-restart-app" type="button" class="btn btn-warning">
+          <i class="fa fa-rotate-right me-1"></i>Restart
         </button>
       </div>
     </div>

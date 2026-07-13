@@ -87,6 +87,30 @@ function setText(id, value) {
   if (el) el.textContent = value;
 }
 
+async function copyText(text) {
+  if (!text) throw new Error('Nothing to copy');
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch { /* Fall back while the click event still owns focus. */ }
+  }
+
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.left = '-9999px';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.focus();
+  input.select();
+  input.setSelectionRange(0, input.value.length);
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw new Error('Clipboard permission denied');
+}
+
 function renderUsageMetric(valueId, detailId, metric) {
   if (!metric) return;
   setText(valueId, fmtPercent(metric.percent));
@@ -110,6 +134,7 @@ const state = {
   chart       : null,
   steamCmdModal: null,
   factoryResetModal: null,
+  restartAppModal: null,
   presetMods  : [],
 };
 
@@ -532,7 +557,7 @@ function initDashboard() {
     const address = document.getElementById('info-join-address').textContent.trim();
     if (!address || address === '—') return;
     try {
-      await navigator.clipboard.writeText(address);
+      await copyText(address);
       toast('Join address copied');
     } catch {
       toast('Could not copy join address', 'warning');
@@ -990,7 +1015,57 @@ async function loadSettings() {
   };
 
   setupFactoryReset();
+  setupRestartApp();
 
+}
+
+function setupRestartApp() {
+  const openBtn = document.getElementById('btn-open-restart-app');
+  const modalEl = document.getElementById('restart-app-modal');
+  const password = document.getElementById('restart-app-password');
+  const confirmBtn = document.getElementById('btn-confirm-restart-app');
+  if (!openBtn || !modalEl || !password || !confirmBtn) return;
+
+  state.restartAppModal = state.restartAppModal || new bootstrap.Modal(modalEl, { backdrop: 'static', keyboard: false });
+  openBtn.disabled = state.serverRunning;
+  openBtn.title = state.serverRunning ? 'Stop the game server before restarting the panel' : '';
+  openBtn.onclick = () => {
+    password.value = '';
+    document.getElementById('restart-app-form').classList.remove('d-none');
+    document.getElementById('restart-app-progress').classList.add('d-none');
+    modalEl.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => { button.disabled = false; });
+    confirmBtn.disabled = false;
+    state.restartAppModal.show();
+    modalEl.addEventListener('shown.bs.modal', () => password.focus(), { once: true });
+  };
+  confirmBtn.onclick = async () => {
+    if (confirmBtn.disabled) return;
+    confirmBtn.disabled = true;
+    modalEl.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => { button.disabled = true; });
+    try {
+      await POST('/api/system/restart', { currentPassword: password.value });
+      document.getElementById('restart-app-form').classList.add('d-none');
+      document.getElementById('restart-app-progress').classList.remove('d-none');
+      waitForRestart();
+    } catch (e) {
+      toast(e.message, 'error');
+      modalEl.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => { button.disabled = false; });
+      confirmBtn.disabled = false;
+    }
+  };
+}
+
+async function waitForRestart() {
+  let observedRestart = false;
+  for (let attempt = 0; attempt < 60; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const response = await fetch(apiUrl('/api/health'), { cache: 'no-store' });
+      if (!response.ok) { observedRestart = true; continue; }
+      if (observedRestart) { window.location.assign('/'); return; }
+    } catch { observedRestart = true; }
+  }
+  toast('The panel is still restarting. Reload the page in a moment.', 'warning');
 }
 
 function setupFactoryReset() {
@@ -1297,11 +1372,15 @@ function showPresetPreview(mods, savedPath = '') {
 // ════════════════════════════════════════════════════════════════════════════════
 // FILE MANAGER
 // ════════════════════════════════════════════════════════════════════════════════
-async function loadFiles(dir, pushHistory = false) {
+async function loadFiles(dir, pushHistory = false, refresh = false) {
   const container = document.getElementById('file-list');
   container.innerHTML = '<div class="text-muted"><i class="fa fa-spinner fa-spin me-2"></i>Loading…</div>';
   try {
-    const data = await GET('/api/files' + (dir ? `?path=${encodeURIComponent(dir)}` : ''));
+    const params = new URLSearchParams();
+    if (dir) params.set('path', dir);
+    if (refresh) params.set('refresh', 'true');
+    const query = params.toString();
+    const data = await GET('/api/files' + (query ? `?${query}` : ''));
     state.currentFilePath = data.path || '';
     state.fileItems = data.items || [];
     renderBreadcrumb(data.path || '', data.rootName || 'Arma 3 Server');
@@ -1319,6 +1398,7 @@ async function loadFiles(dir, pushHistory = false) {
     await uploadFiles(this.files);
     this.value = '';
   };
+  document.getElementById('btn-refresh-files').onclick = () => loadFiles(state.currentFilePath, false, true);
   initFileDropZone();
 }
 
@@ -1587,7 +1667,7 @@ async function loadStartupSettings() {
 
   document.getElementById('btn-copy-startup-command').onclick = async () => {
     try {
-      await navigator.clipboard.writeText(document.getElementById('startup-command').textContent);
+      await copyText(document.getElementById('startup-command').textContent);
       toast('Startup command copied');
     } catch {
       toast('Could not copy command', 'warning');

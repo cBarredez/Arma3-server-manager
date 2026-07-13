@@ -191,6 +191,10 @@ def build_image(target: Target, remote_dir: str, release: str, service: str) -> 
     image = f"localhost/arma3-manager-{service}:{release}"
     containerfile = "Containerfile.api" if service == "api" else "Containerfile.frontend"
     remote(target, ["podman", "build", "--file", f"{remote_dir}/{containerfile}", "--tag", image, remote_dir])
+    # Rebuilding under the same tag orphans the previous image as a dangling <none> layer set. Both
+    # Containerfiles label their final stage `project=arma3-manager`, so this prune only ever touches
+    # this project's own leftovers, never other containers/images sharing the host.
+    remote(target, ["podman", "image", "prune", "-f", "--filter", "label=project=arma3-manager"], check=False)
     return image
 
 

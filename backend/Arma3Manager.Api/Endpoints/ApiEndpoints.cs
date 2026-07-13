@@ -349,10 +349,13 @@ public static class ApiEndpoints
             return Results.Json(new { ok = true, deletedMods = deleting.Count });
         });
         
-        api.MapGet("/files", async (string? path) =>
+        api.MapGet("/files", async (string? path, bool? refresh) =>
         {
             var dir = PathGuard.Resolve(cfg.Arma3Dir, path);
             var rel = PathGuard.Relative(cfg.Arma3Dir, dir);
+            // Manual sync request: drop just this directory's index row so the read below falls back to a
+            // single-level live listing instead of a full-tree rescan, keeping the CPU/RAM cost negligible.
+            if (refresh == true) await store.InvalidateFileIndexDirAsync(rel);
             var indexed = WorkshopStorage.IsSymbolicLink(dir) ? null : await store.GetFileIndexChildrenAsync(rel);
             var items = indexed ?? await Task.Run(() => LiveListFallback(dir, cfg.Arma3Dir));
             if (rel.Length == 0)
@@ -522,6 +525,26 @@ public static class ApiEndpoints
             http.Session.SetString("authenticated", "true");
             http.Session.SetString("authProof", SessionProof.Create(cfg.SessionSecret));
             return Results.Json(new { ok = true, username = updated.Username });
+        });
+
+        api.MapPost("/system/restart", async (RestartAppRequest req, RuntimeState runtime, SteamCmdSession steam, IHostApplicationLifetime lifetime) =>
+        {
+            if (runtime.IsRunning)
+                return Results.Json(new { error = "Stop the game server before restarting the panel" }, statusCode: 409);
+            if (runtime.IsMaintenanceBusy || steam.IsRunning)
+                return Results.Json(new { error = "Wait for SteamCMD and maintenance tasks to finish" }, statusCode: 409);
+            var auth = await store.GetPanelAuthAsync(cfg);
+            if (!PasswordHasher.Verify(req.CurrentPassword, auth.PasswordSalt, auth.PasswordHash))
+                return Results.Json(new { error = "Current password is incorrect" }, statusCode: 400);
+
+            // Exits the process only; podman's `restart: unless-stopped` policy brings the container straight
+            // back up. No volumes are touched, so mods, config, and SQLite state survive untouched.
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(750);
+                lifetime.StopApplication();
+            });
+            return Results.Json(new { accepted = true, message = "Panel is restarting. This takes a few seconds." }, statusCode: StatusCodes.Status202Accepted);
         });
 
         api.MapPost("/system/factory-reset", async (FactoryResetRequest req, RuntimeState runtime, SteamCmdSession steam, IHostApplicationLifetime lifetime) =>
