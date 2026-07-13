@@ -6,6 +6,7 @@ COPY backend/Arma3Manager.Api/ backend/Arma3Manager.Api/
 RUN dotnet publish backend/Arma3Manager.Api/Arma3Manager.Api.csproj -c Release -o /out --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
+LABEL project=arma3-manager
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV STEAMCMD_DIR=/steamcmd

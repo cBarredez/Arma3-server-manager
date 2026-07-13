@@ -219,18 +219,28 @@ public static class ServerCfgWriter
 
 public static class MissionConfig
 {
+    // ServerPaths.MissionsDir is resolved once at process startup and can predate the mpmissions folder
+    // (e.g. a fresh deploy where the Arma3 install finishes after the API boots). Re-checking here is a
+    // single Directory.Exists stat per request, so it stays accurate without needing a container restart.
+    static string ResolveMissionsDir(ServerPaths paths)
+    {
+        var mpmissions = Path.Combine(paths.Arma3Dir, "mpmissions");
+        return Directory.Exists(mpmissions) ? mpmissions : paths.MissionsDir;
+    }
+
     public static MissionEntry[] List(ServerPaths paths)
     {
-        if (!Directory.Exists(paths.MissionsDir)) return [];
+        var missionsDir = ResolveMissionsDir(paths);
+        if (!Directory.Exists(missionsDir)) return [];
         var entries = new List<MissionEntry>();
-        foreach (var file in Directory.EnumerateFiles(paths.MissionsDir, "*", SearchOption.TopDirectoryOnly))
+        foreach (var file in Directory.EnumerateFiles(missionsDir, "*", SearchOption.TopDirectoryOnly))
         {
             if (!file.EndsWith(".pbo", StringComparison.OrdinalIgnoreCase)) continue;
             var info = new FileInfo(file);
             var name = info.Name[..^4];
             entries.Add(new(name, info.Name, true, info.Length, info.LastWriteTimeUtc));
         }
-        foreach (var directory in Directory.EnumerateDirectories(paths.MissionsDir, "*", SearchOption.TopDirectoryOnly))
+        foreach (var directory in Directory.EnumerateDirectories(missionsDir, "*", SearchOption.TopDirectoryOnly))
         {
             var info = new DirectoryInfo(directory);
             entries.Add(new(info.Name, info.Name, false, 0, info.LastWriteTimeUtc));
