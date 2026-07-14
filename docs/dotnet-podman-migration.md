@@ -48,3 +48,17 @@ El despliegue reemplaza contenedores, no volúmenes. La base
 Las rutas REST, métodos, nombres de funciones del cliente y estructuras JSON se
 mantuvieron durante la migración. El frontend utiliza polling REST para estado y
 Server-Sent Events para logs.
+
+## Flujo de logs en Linux
+
+El proceso `arma3server_x64` entrega su salida RPT por `stdout` y `stderr`; el
+backend usa esa salida como fuente canónica y no vuelve a leer archivos `.rpt`.
+Cada línea entra en un buffer circular de 5,000 eventos con un ID estable. El
+cliente recupera primero un snapshot por REST y continúa por SSE usando ese ID.
+Si el cliente queda por detrás del buffer, recibe un evento `gap` y vuelve a
+cargar el historial disponible en lugar de ocultar la pérdida.
+
+La ruta `/api/logs/stream` envía un heartbeat cada 15 segundos. Nginx desactiva
+buffering, caché, compresión y cierra el upstream si pasan 45 segundos sin datos.
+Un proxy inverso adicional debe conservar `text/event-stream` sin buffering y
+usar un timeout de lectura superior a 45 segundos.

@@ -28,7 +28,9 @@ builder.WebHost.UseKestrel(options =>
 builder.Services.AddSingleton(config);
 builder.Services.AddSingleton(paths);
 builder.Services.AddSingleton(store);
+builder.Services.AddSingleton<LogHub>();
 builder.Services.AddSingleton<RuntimeState>();
+builder.Services.AddSingleton<LogStreamService>();
 builder.Services.AddSingleton<SteamCmdSession>();
 builder.Services.AddSingleton<BattlEyeRconClient>();
 builder.Services.AddSingleton<MetricsSampler>();

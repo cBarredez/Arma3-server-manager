@@ -442,66 +442,20 @@ public static class ApiEndpoints
             await File.WriteAllTextAsync(Path.Combine(paths.ConfigDir, req.File), req.Content);
             return Results.Json(new { ok = true });
         });
-        api.MapGet("/logs", (RuntimeState runtime, int? limit) => Results.Json(runtime.Logs.TakeLast(Math.Min(limit ?? 300, 1000))));
+        api.MapGet("/logs", (RuntimeState runtime, int? limit) =>
+            Results.Json(runtime.GetLogs(Math.Clamp(limit ?? 300, 0, LogHub.DefaultCapacity))));
         
-        // Server-Sent Events — pushes new log lines and status changes in real time.
-        // The client sends ?since=N where N is the last stable log ID it received.
-        // Reconnects are handled automatically by the browser EventSource API.
-        api.MapGet("/logs/stream", async (HttpContext http, RuntimeState runtime, CancellationToken ct, long since = 0) =>
+        // Server-Sent Events — stable IDs support native Last-Event-ID reconnects while the
+        // bounded LogHub reports an explicit gap if a client falls behind its retained history.
+        api.MapGet("/logs/stream", (HttpContext http, LogStreamService stream, CancellationToken ct, long since = 0) =>
         {
-            http.Response.Headers.ContentType  = "text/event-stream";
             http.Response.Headers.CacheControl = "no-cache";
-            http.Response.Headers.Connection   = "keep-alive";
-            // Disable response buffering so bytes reach the client immediately
+            http.Response.Headers["X-Accel-Buffering"] = "no";
             http.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpResponseBodyFeature>()?.DisableBuffering();
-            await http.Response.Body.FlushAsync(ct);
-        
-            var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
             var lastId = Math.Max(0, since);
             if (long.TryParse(http.Request.Headers["Last-Event-ID"], out var reconnectId))
                 lastId = Math.Max(lastId, reconnectId);
-            var wasRunning  = runtime.IsRunning;
-            var nextPing = DateTimeOffset.UtcNow.AddSeconds(15);
-        
-            while (!ct.IsCancellationRequested)
-            {
-                try
-                {
-                    // Send any new log lines
-                    var pending = await runtime.WaitForLogsAfterAsync(lastId, TimeSpan.FromSeconds(15), ct);
-                    if (pending.Count > 0)
-                    {
-                        foreach (var entry in pending)
-                        {
-                            var line = $"id: {entry.Id}\ndata: {JsonSerializer.Serialize(entry, json)}\n\n";
-                            await http.Response.WriteAsync(line, ct);
-                            lastId = entry.Id;
-                        }
-                        await http.Response.Body.FlushAsync(ct);
-                    }
-        
-                    // Send status event when running state changes
-                    var isRunning = runtime.IsRunning;
-                    if (isRunning != wasRunning)
-                    {
-                        var evt = $"event: status\ndata: {JsonSerializer.Serialize(new { running = isRunning, pid = runtime.ProcessId }, json)}\n\n";
-                        await http.Response.WriteAsync(evt, ct);
-                        await http.Response.Body.FlushAsync(ct);
-                        wasRunning = isRunning;
-                    }
-        
-                    // Keep-alive ping every 15 s so proxies don't close the connection
-                    if (DateTimeOffset.UtcNow >= nextPing)
-                    {
-                        await http.Response.WriteAsync(": ping\n\n", ct);
-                        await http.Response.Body.FlushAsync(ct);
-                        nextPing = DateTimeOffset.UtcNow.AddSeconds(15);
-                    }
-        
-                }
-                catch (OperationCanceledException) { break; }
-                catch { break; }
-            }
+            return TypedResults.ServerSentEvents(stream.Stream(lastId, ct));
         });
         
         api.MapGet("/paths", () => Results.Json(paths));
@@ -869,7 +823,7 @@ public static class ApiEndpoints
                 var lowercased = ModFileRepair.MakeLowercase(mods);
                 if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
                 await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
-                runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir, startup.ProfilesDir);
+                runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
             }
             catch (Exception exception)
             {
