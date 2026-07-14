@@ -147,7 +147,7 @@ public static class ApiEndpoints
             var joinHost = !string.IsNullOrWhiteSpace(cfg.PublicJoinHost)
                 ? cfg.PublicJoinHost
                 : Uri.TryCreate(cfg.BaseUrl, UriKind.Absolute, out var baseUri) ? baseUri.Host : "";
-            return Results.Json(new { running = runtime.IsRunning, pid = runtime.ProcessId, port = startup.Port, joinHost });
+            return Results.Json(new { running = runtime.IsRunning, pid = runtime.ProcessId, port = startup.Port, joinHost, headlessClientPids = runtime.HeadlessClientPids });
         });
         
         api.MapPost("/server/start", async (RuntimeState runtime) =>
@@ -870,6 +870,19 @@ public static class ApiEndpoints
                 if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
                 await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
                 runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir, startup.ProfilesDir);
+
+                if (startup.HeadlessClients > 0)
+                {
+                    // Give the main server a moment to bind its port before HCs try to connect; they still
+                    // auto-retry on failure, but starting them immediately just wastes the first attempt.
+                    await Task.Delay(3000);
+                    for (var i = 1; i <= startup.HeadlessClients; i++)
+                    {
+                        var hcProfileDir = Path.Combine(startup.ProfilesDir, $"hc{i}");
+                        Directory.CreateDirectory(hcProfileDir);
+                        runtime.StartHeadlessClient(bin, CommandBuilder.HeadlessClientArgs(paths, startup, mods, i, hcProfileDir), cfg.Arma3Dir, i);
+                    }
+                }
             }
             catch (Exception exception)
             {

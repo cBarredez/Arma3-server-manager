@@ -27,6 +27,26 @@ public static class CommandBuilder
         if (settings.DisableBattleEye) yield return "-noBattlEye";
         foreach (var argument in SplitArgs(settings.ExtraParams)) yield return argument;
     }
+
+    // A headless client is the same binary launched in -client mode, connecting back to the main server over
+    // loopback instead of hosting. Each one needs its own profile directory (so they don't clash over lock
+    // files) and a distinct -name so they're identifiable in the server's player list / RPT logs.
+    public static IEnumerable<string> HeadlessClientArgs(ServerPaths paths, StartupSettings settings, IEnumerable<string> mods, int index, string profilesDir)
+    {
+        yield return "-client";
+        yield return "-connect=127.0.0.1";
+        yield return $"-port={settings.Port}";
+        yield return $"-cfg={settings.BasicCfg}";
+        yield return $"-profiles={profilesDir}";
+        yield return $"-name=hc{index}";
+        yield return "-noSplash";
+        yield return "-noPause";
+        yield return "-world=empty";
+        var modList = mods.Select(mod => Path.GetRelativePath(paths.Arma3Dir, mod)).ToArray();
+        if (modList.Length > 0) yield return $"-mod={string.Join(';', modList)}";
+        if (settings.DisableBattleEye) yield return "-noBattlEye";
+    }
+
     public static IEnumerable<string> SplitArgs(string value) => Regex.Matches(value ?? "", @"[^\s""]+|""([^""]*)""").Select(match => match.Value.Trim('"'));
     static string Quote(string argument) => argument.Any(char.IsWhiteSpace) ? $"\"{argument.Replace("\"", "\\\"")}\"" : argument;
 }

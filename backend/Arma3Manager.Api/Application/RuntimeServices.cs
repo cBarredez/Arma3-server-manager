@@ -12,6 +12,7 @@ public sealed record TaskRunResult(int ExitCode, IReadOnlyList<string> Output);
 public sealed class RuntimeState
 {
     Process? process;
+    readonly List<Process> headlessClients = [];
     CancellationTokenSource? rptCts;
     readonly List<LogEntry> logs = [];
     readonly SemaphoreSlim taskGate = new(1, 1);
@@ -47,13 +48,25 @@ public sealed class RuntimeState
         get { lock (queuedTaskKeys) return taskGate.CurrentCount == 0 || queuedTaskKeys.Count > 0; }
     }
     public int? ProcessId => IsRunning ? process!.Id : null;
+    public int[] HeadlessClientPids
+    {
+        get { lock (headlessClients) return headlessClients.Where(hc => hc is { HasExited: false }).Select(hc => hc.Id).ToArray(); }
+    }
 
     public void Start(string file, IEnumerable<string> arguments, string workingDirectory, string? profilesDir = null)
     {
         var startedAtUtc = DateTime.UtcNow;
         process = StartProcess(file, arguments, workingDirectory);
         Push("system", $"Started {file} PID {process.Id}");
-        process.Exited += (_, _) => Push("system", $"Server exited with code {process.ExitCode}");
+        process.Exited += (_, _) =>
+        {
+            Push("system", $"Server exited with code {process.ExitCode}");
+            lock (headlessClients)
+            {
+                foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
+                headlessClients.Clear();
+            }
+        };
 
         rptCts?.Cancel();
         if (!string.IsNullOrWhiteSpace(profilesDir))
@@ -63,9 +76,31 @@ public sealed class RuntimeState
             _ = TailRptAsync(profilesDir, startedAtUtc, cts.Token);
         }
     }
+    // Headless clients are additional instances of the same server binary launched in -client mode, connecting
+    // back to the main server over loopback to take over AI processing. They're started after the main server
+    // so they have something to connect to, and are tracked separately so Stop() always takes all of them down
+    // together — an orphaned HC process would otherwise keep running (and keep its slot on the server) after
+    // the panel reports the server as stopped.
+    public void StartHeadlessClient(string file, IEnumerable<string> arguments, string workingDirectory, int index)
+    {
+        var hc = StartProcess(file, arguments, workingDirectory);
+        lock (headlessClients) headlessClients.Add(hc);
+        Push("system", $"Started headless client {index} PID {hc.Id}");
+        hc.Exited += (_, _) =>
+        {
+            lock (headlessClients) headlessClients.Remove(hc);
+            Push("system", $"Headless client {index} exited with code {hc.ExitCode}");
+        };
+    }
+
     public void Stop()
     {
         if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
+        lock (headlessClients)
+        {
+            foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
+            headlessClients.Clear();
+        }
         Push("system", "Server stopped");
         rptCts?.Cancel();
     }
