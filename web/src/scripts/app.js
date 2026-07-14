@@ -1,6 +1,15 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    Arma 3 Server Manager — Frontend SPA
    ═══════════════════════════════════════════════════════════════════════════ */
+import {
+  LOG_DOM_LIMIT,
+  LogConnectionGate,
+  advanceLogCursor,
+  countMissingLogEntries,
+  isNearLogBottom,
+  trimLogContainer,
+} from './log-viewer.js';
+
 'use strict';
 
 const API_BASE = (window.ARMA3_API_BASE || '').replace(/\/$/, '');
@@ -244,8 +253,16 @@ function initNav() {
   });
 
   document.getElementById('btn-logout').addEventListener('click', async () => {
+    stopLogStream();
     await POST('/api/auth/logout').catch(() => {});
     location.reload();
+  });
+
+  window.addEventListener('offline', () => {
+    if (state.view === 'logs') setLogStreamStatus('Offline', 'danger');
+  });
+  window.addEventListener('online', () => {
+    if (state.view === 'logs') restartLogStream(document.getElementById('log-output'));
   });
 
 }
@@ -322,7 +339,7 @@ function initSocket() {
   });
 
   state.socket.on('server:log', entry => {
-    if (state.view === 'logs') appendLog(entry);
+    if (state.view === 'logs' && !logConnections.hasSource) appendLog(entry);
   });
 
   state.socket.on('metrics:tick', d => {
@@ -1769,8 +1786,16 @@ function setChecked(id, value) { const el = document.getElementById(id); if (el)
 function getChecked(id) { return !!document.getElementById(id)?.checked; }
 
 // ─── log SSE state ────────────────────────────────────────────────────────────
-let logEventSource = null;
+const logConnections = new LogConnectionGate();
+const LOG_STALE_AFTER_MS = 40_000;
 let logCursor = 0;
+let logLastActivity = 0;
+let logWatchdog = null;
+let logRenderFrame = null;
+let logRenderQueue = [];
+let logUnseenCount = 0;
+let logGapRecovery = false;
+let logAuthCheckPending = false;
 
 function setLogStreamStatus(label, style) {
   const status = document.getElementById('log-stream-status');
@@ -1779,53 +1804,97 @@ function setLogStreamStatus(label, style) {
   status.className = `badge text-bg-${style}`;
 }
 
-function stopLogStream() {
-  if (logEventSource) { logEventSource.close(); logEventSource = null; }
-  setLogStreamStatus('Paused', 'secondary');
+function clearLogWatchdog() {
+  if (logWatchdog) window.clearInterval(logWatchdog);
+  logWatchdog = null;
+}
+
+function cancelPendingLogRender() {
+  if (logRenderFrame) window.cancelAnimationFrame(logRenderFrame);
+  logRenderFrame = null;
+  logRenderQueue = [];
+}
+
+function stopLogStream(label = 'Paused', style = 'secondary') {
+  logConnections.stop();
+  clearLogWatchdog();
+  cancelPendingLogRender();
+  setLogStreamStatus(label, style);
 }
 
 async function loadLogs() {
-  stopLogStream();
+  const generation = logConnections.begin();
+  clearLogWatchdog();
+  cancelPendingLogRender();
+  setLogStreamStatus('Connecting', 'secondary');
   const out = document.getElementById('log-output');
-  out.textContent = '';
+  out.replaceChildren();
   logCursor = 0;
+  logUnseenCount = 0;
+  updateNewLogCount();
+  hideLogNotice();
 
-  document.getElementById('btn-clear-logs').onclick = () => { out.replaceChildren(); };
+  document.getElementById('btn-clear-logs').onclick = () => {
+    out.replaceChildren();
+    logUnseenCount = 0;
+    updateNewLogCount();
+  };
+  document.getElementById('log-new-lines').onclick = () => scrollLogsToLive(out);
+  out.onscroll = () => {
+    if (isNearLogBottom(out)) {
+      logUnseenCount = 0;
+      updateNewLogCount();
+    }
+  };
 
   // Load historical logs first
   try {
     const entries = await GET('/api/logs?limit=300');
+    if (!logConnections.isCurrent(generation)) return;
     if (entries.length) {
       const fragment = document.createDocumentFragment();
       entries.forEach(entry => fragment.appendChild(createLogLine(entry)));
       out.appendChild(fragment);
-      logCursor = Number(entries.at(-1)?.id) || 0;
+      trimLogContainer(out);
+      logCursor = advanceLogCursor(0, entries.at(-1)?.id);
     }
-  } catch (e) { out.textContent = 'Error loading logs: ' + e.message; }
+  } catch (e) {
+    if (!logConnections.isCurrent(generation)) return;
+    showLogNotice('Could not load log history: ' + e.message, 'danger');
+  }
 
   if (document.getElementById('log-autoscroll')?.checked) out.scrollTop = out.scrollHeight;
-
-  startLogStream(out);
+  if (logConnections.isCurrent(generation)) startLogStream(out, generation);
 }
 
-function startLogStream(out) {
+function startLogStream(out, generation) {
   setLogStreamStatus('Connecting', 'secondary');
   const url = apiUrl(`/api/logs/stream?since=${logCursor}`);
-  logEventSource = new EventSource(url, { withCredentials: true });
+  const source = new EventSource(url, { withCredentials: true });
+  if (!logConnections.attach(generation, source)) return;
+  logLastActivity = Date.now();
 
-  logEventSource.onopen = () => setLogStreamStatus('Live', 'success');
+  source.onopen = () => {
+    if (!logConnections.owns(generation, source)) return;
+    touchLogStream();
+    setLogStreamStatus('Live', 'success');
+  };
 
-  logEventSource.onmessage = e => {
+  source.onmessage = e => {
+    if (!logConnections.owns(generation, source)) return;
+    touchLogStream();
     try {
       const entry = JSON.parse(e.data);
       const entryId = Number(entry.id) || 0;
       if (entryId && entryId <= logCursor) return;
-      logCursor = Math.max(logCursor, entryId);
-      appendLogLine(out, entry);
-    } catch { /* ignore malformed */ }
+      logCursor = advanceLogCursor(logCursor, entryId);
+      queueLogLine(out, entry);
+    } catch { showLogNotice('A malformed log event was ignored.', 'warning'); }
   };
 
-  logEventSource.addEventListener('status', e => {
+  source.addEventListener('status', e => {
+    if (!logConnections.owns(generation, source)) return;
+    touchLogStream();
     try {
       const { running, pid } = JSON.parse(e.data);
       updateServerStatus(running);
@@ -1836,20 +1905,154 @@ function startLogStream(out) {
     } catch { /* ignore */ }
   });
 
-  logEventSource.onerror = () => {
-    setLogStreamStatus('Reconnecting', 'warning');
+  source.addEventListener('heartbeat', () => {
+    if (!logConnections.owns(generation, source)) return;
+    touchLogStream();
+    setLogStreamStatus('Live', 'success');
+  });
+
+  source.addEventListener('gap', e => {
+    if (!logConnections.owns(generation, source)) return;
+    touchLogStream();
+    try { recoverFromLogGap(out, JSON.parse(e.data), generation, source); }
+    catch { showLogNotice('The server reported an unreadable log gap.', 'warning'); }
+  });
+
+  source.onerror = () => {
+    if (!logConnections.owns(generation, source)) return;
+    setLogStreamStatus(navigator.onLine ? 'Reconnecting' : 'Offline', navigator.onLine ? 'warning' : 'danger');
+    checkLogStreamAuthentication(generation, source);
   };
+
+  clearLogWatchdog();
+  logWatchdog = window.setInterval(() => {
+    if (!logConnections.owns(generation, source)) return;
+    if (Date.now() - logLastActivity <= LOG_STALE_AFTER_MS) return;
+    showLogNotice('No heartbeat received; the live stream was restarted.', 'warning');
+    restartLogStream(out);
+  }, 5_000);
 }
 
-function appendLogLine(out, entry, autoscroll = true) {
-  out.appendChild(createLogLine(entry));
-  if (autoscroll && document.getElementById('log-autoscroll')?.checked) out.scrollTop = out.scrollHeight;
+function restartLogStream(out) {
+  if (!out || state.view !== 'logs') return;
+  const generation = logConnections.begin();
+  clearLogWatchdog();
+  startLogStream(out, generation);
+}
+
+function touchLogStream() {
+  logLastActivity = Date.now();
+}
+
+async function checkLogStreamAuthentication(generation, source) {
+  if (logAuthCheckPending || !navigator.onLine) return;
+  logAuthCheckPending = true;
+  try {
+    const session = await GET('/api/auth/check');
+    if (logConnections.owns(generation, source) && !session.authenticated) {
+      stopLogStream('Session expired', 'danger');
+      showLogNotice('Your session expired. Sign in again to resume server logs.', 'danger');
+    }
+  } catch { /* A network failure is already represented by the stream status. */ }
+  finally { logAuthCheckPending = false; }
+}
+
+async function recoverFromLogGap(out, gap, generation, source) {
+  if (logGapRecovery || !logConnections.owns(generation, source)) return;
+  logGapRecovery = true;
+  const missing = countMissingLogEntries(gap);
+  setLogStreamStatus('Gap detected', 'warning');
+  showLogNotice(
+    missing > 0
+      ? `${missing.toLocaleString()} log lines expired before they could be recovered. Showing the newest history.`
+      : 'The previous log cursor is no longer available. Showing the newest history.',
+    'warning');
+
+  const recoveryGeneration = logConnections.begin();
+  clearLogWatchdog();
+  cancelPendingLogRender();
+  try {
+    const entries = await GET(`/api/logs?limit=${LOG_DOM_LIMIT}`);
+    if (!logConnections.isCurrent(recoveryGeneration)) return;
+    out.replaceChildren();
+    const fragment = document.createDocumentFragment();
+    entries.forEach(entry => fragment.appendChild(createLogLine(entry)));
+    out.appendChild(fragment);
+    trimLogContainer(out);
+    logCursor = advanceLogCursor(0, entries.at(-1)?.id);
+    scrollLogsToLive(out);
+    startLogStream(out, recoveryGeneration);
+  } catch (error) {
+    if (logConnections.isCurrent(recoveryGeneration)) {
+      setLogStreamStatus('Reconnecting', 'warning');
+      showLogNotice('Could not recover the latest log history: ' + error.message, 'danger');
+      startLogStream(out, recoveryGeneration);
+    }
+  } finally {
+    logGapRecovery = false;
+  }
+}
+
+function queueLogLine(out, entry) {
+  logRenderQueue.push({ out, entry });
+  if (logRenderFrame) return;
+  logRenderFrame = window.requestAnimationFrame(flushLogRenderQueue);
+}
+
+function flushLogRenderQueue() {
+  logRenderFrame = null;
+  const pending = logRenderQueue;
+  logRenderQueue = [];
+  if (!pending.length) return;
+  const out = pending[0].out;
+  const stickToBottom = document.getElementById('log-autoscroll')?.checked && isNearLogBottom(out);
+  const previousScrollTop = out.scrollTop;
+  const fragment = document.createDocumentFragment();
+  pending.forEach(({ entry }) => fragment.appendChild(createLogLine(entry)));
+  out.appendChild(fragment);
+  const trimmed = trimLogContainer(out);
+  if (stickToBottom) {
+    out.scrollTop = out.scrollHeight;
+    logUnseenCount = 0;
+  } else {
+    if (trimmed.height) out.scrollTop = Math.max(0, previousScrollTop - trimmed.height);
+    logUnseenCount += pending.length;
+  }
+  updateNewLogCount();
+}
+
+function scrollLogsToLive(out) {
+  out.scrollTop = out.scrollHeight;
+  logUnseenCount = 0;
+  updateNewLogCount();
+}
+
+function updateNewLogCount() {
+  const button = document.getElementById('log-new-lines');
+  const count = document.getElementById('log-new-lines-count');
+  if (!button || !count) return;
+  count.textContent = logUnseenCount.toLocaleString();
+  button.classList.toggle('d-none', logUnseenCount === 0);
+}
+
+function showLogNotice(message, style = 'warning') {
+  const notice = document.getElementById('log-stream-notice');
+  if (!notice) return;
+  notice.textContent = message;
+  notice.className = `log-stream-notice log-stream-notice-${style}`;
+}
+
+function hideLogNotice() {
+  const notice = document.getElementById('log-stream-notice');
+  if (!notice) return;
+  notice.textContent = '';
+  notice.className = 'log-stream-notice d-none';
 }
 
 function appendLog(entry) {
   if (state.view !== 'logs') return;
   const out = document.getElementById('log-output');
-  appendLogLine(out, entry);
+  queueLogLine(out, entry);
 }
 
 function createLogLine(entry, includeTime = true) {
@@ -1857,6 +2060,9 @@ function createLogLine(entry, includeTime = true) {
   const labels = { error: 'ERR', warning: 'WARN', success: 'OK', system: 'SYS', output: 'OUT', rpt: 'RPT' };
   const line = document.createElement('span');
   line.className = 'log-line';
+  line.dataset.source = entry.source || 'manager';
+  if (entry.runId) line.dataset.runId = entry.runId;
+  line.title = `Source: ${entry.source || 'manager'}`;
   if (includeTime) {
     const time = document.createElement('span');
     time.className = 'log-time';

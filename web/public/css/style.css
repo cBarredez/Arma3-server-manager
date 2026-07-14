@@ -383,12 +383,37 @@ html, body {
   font-size: .78rem;
   color: #a8b5c8;
   max-height: 420px;
+  overflow-anchor: none;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
   margin: 0;
 }
 .log-line { display: block; color: #a8b5c8; }
+.log-new-lines {
+  appearance: none;
+  background: rgba(105, 183, 255, .1);
+  border: 1px solid rgba(105, 183, 255, .4);
+  border-radius: 999px;
+  color: #9fceff;
+  cursor: pointer;
+  font-family: 'Courier New', monospace;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .02em;
+  padding: .22rem .65rem;
+}
+.log-new-lines:hover { background: rgba(105, 183, 255, .18); color: #c6e2ff; }
+.log-stream-notice {
+  border-left: 3px solid #f4c95d;
+  border-radius: 4px;
+  color: #d7dde7;
+  font-size: .78rem;
+  margin-top: .65rem;
+  padding: .55rem .75rem;
+}
+.log-stream-notice-warning { background: rgba(244, 201, 93, .08); border-color: #f4c95d; }
+.log-stream-notice-danger { background: rgba(255, 107, 114, .08); border-color: #ff6b72; }
 .log-time { color: #778395; }
 .log-level { font-weight: 700; }
 .log-level.log-error { color: #ff6b72; }
