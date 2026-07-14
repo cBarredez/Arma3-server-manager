@@ -396,6 +396,7 @@ html, body {
 .log-level.log-success { color: #65d58a; }
 .log-level.log-system { color: #69b7ff; }
 .log-level.log-output { color: #8996a8; }
+.log-level.log-rpt { color: #c48aff; }
 
 .code-editor {
   width: 100%;
