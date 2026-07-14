@@ -12,6 +12,7 @@ public sealed record TaskRunResult(int ExitCode, IReadOnlyList<string> Output);
 public sealed class RuntimeState
 {
     Process? process;
+    CancellationTokenSource? rptCts;
     readonly List<LogEntry> logs = [];
     readonly SemaphoreSlim taskGate = new(1, 1);
     readonly HashSet<string> queuedTaskKeys = new(StringComparer.Ordinal);
@@ -47,16 +48,72 @@ public sealed class RuntimeState
     }
     public int? ProcessId => IsRunning ? process!.Id : null;
 
-    public void Start(string file, IEnumerable<string> arguments, string workingDirectory)
+    public void Start(string file, IEnumerable<string> arguments, string workingDirectory, string? profilesDir = null)
     {
+        var startedAtUtc = DateTime.UtcNow;
         process = StartProcess(file, arguments, workingDirectory);
         Push("system", $"Started {file} PID {process.Id}");
         process.Exited += (_, _) => Push("system", $"Server exited with code {process.ExitCode}");
+
+        rptCts?.Cancel();
+        if (!string.IsNullOrWhiteSpace(profilesDir))
+        {
+            var cts = new CancellationTokenSource();
+            rptCts = cts;
+            _ = TailRptAsync(profilesDir, startedAtUtc, cts.Token);
+        }
     }
     public void Stop()
     {
         if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
         Push("system", "Server stopped");
+        rptCts?.Cancel();
+    }
+
+    // Arma writes most connection/desync/addon-mismatch diagnostics to its .rpt report file in the profiles
+    // directory, not to stdout — so the console log alone misses kicks, BE actions, and network errors that
+    // explain "sometimes I can't connect" symptoms. This polls for the newest .rpt created after server start
+    // and streams new lines into the same log feed the panel already displays.
+    async Task TailRptAsync(string profilesDir, DateTime startedAtUtc, CancellationToken ct)
+    {
+        string? currentFile = null;
+        long position = 0;
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (currentFile is null && Directory.Exists(profilesDir))
+                {
+                    var newest = Directory.EnumerateFiles(profilesDir, "*.rpt")
+                        .Select(path => new FileInfo(path))
+                        .Where(info => info.LastWriteTimeUtc >= startedAtUtc.AddSeconds(-5))
+                        .OrderByDescending(info => info.LastWriteTimeUtc)
+                        .FirstOrDefault();
+                    if (newest is not null)
+                    {
+                        currentFile = newest.FullName;
+                        position = 0;
+                        Push("system", $"Tailing RPT log: {newest.Name}");
+                    }
+                }
+                if (currentFile is not null && File.Exists(currentFile))
+                {
+                    await using var stream = new FileStream(currentFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    if (stream.Length < position) position = 0; // rotated/truncated
+                    stream.Seek(position, SeekOrigin.Begin);
+                    using var reader = new StreamReader(stream);
+                    string? line;
+                    while ((line = await reader.ReadLineAsync(ct)) is not null)
+                        Push("rpt", line);
+                    position = stream.Position;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // Transient IO error while Arma is mid-write; retry on the next tick.
+            }
+            try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { break; }
+        }
     }
     public bool RunTask(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null, string? dedupeKey = null)
     {

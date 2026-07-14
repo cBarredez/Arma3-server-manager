@@ -822,6 +822,11 @@ public static class ApiEndpoints
         return uploaded;
     }
 
+    // Fast checks (binary present, Steam login cached) run synchronously so bad requests still fail fast.
+    // The slow part — Workshop mod update/download, which can run for minutes — moves to a background task
+    // so the HTTP request returns immediately instead of blocking until it's done. Previously the whole
+    // sequence ran inline, and browsers/reverse proxies would drop the connection (499) long before it
+    // finished, making the panel look hung even though the start was still progressing server-side.
     static async Task<IResult> StartServerAsync(AppConfig cfg, ServerPaths paths, SqliteStore store, RuntimeState runtime)
     {
         var startup = await store.GetStartupAsync(paths, cfg);
@@ -830,30 +835,48 @@ public static class ApiEndpoints
             return Results.Json(new { error = "Server binary not found. Please install the server first." }, statusCode: 400);
 
         var workshopMods = await store.GetActiveWorkshopModsAsync();
+        SteamAuth? auth = null;
         if (workshopMods.Count > 0)
         {
-            var auth = await store.GetSteamAuthAsync();
+            auth = await store.GetSteamAuthAsync();
             var user = ResolvedSteamUser(cfg, auth);
             if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
-
-            runtime.Push("system", $"Checking updates for {workshopMods.Count} active Workshop mods before server start");
-            var checking = workshopMods.Select(mod => new PresetMod(mod.Name, mod.WorkshopId!)).ToList();
-            var failed = await DownloadWorkshopModsWithRetriesAsync(cfg, store, paths, runtime, auth, checking, "mods:startup-check");
-            if (failed.Count > 0)
-                return Results.Json(new { error = $"SteamCMD could not update: {string.Join(", ", failed.Select(mod => mod.WorkshopId))}. Review Server Logs before starting." }, statusCode: 502);
-            runtime.Push("system", "Active Workshop mods are current and storage is optimized");
         }
-        else
+
+        _ = Task.Run(async () =>
         {
-            WorkshopStorage.RepairDuplicates(cfg);
-            await store.NormalizeWorkshopModPathsAsync(cfg);
-        }
+            try
+            {
+                if (workshopMods.Count > 0)
+                {
+                    runtime.Push("system", $"Checking updates for {workshopMods.Count} active Workshop mods before server start");
+                    var checking = workshopMods.Select(mod => new PresetMod(mod.Name, mod.WorkshopId!)).ToList();
+                    var failed = await DownloadWorkshopModsWithRetriesAsync(cfg, store, paths, runtime, auth, checking, "mods:startup-check");
+                    if (failed.Count > 0)
+                    {
+                        runtime.Push("stderr", $"Server start aborted: SteamCMD could not update {string.Join(", ", failed.Select(mod => mod.WorkshopId))}. Review Server Logs and try again.");
+                        return;
+                    }
+                    runtime.Push("system", "Active Workshop mods are current and storage is optimized");
+                }
+                else
+                {
+                    WorkshopStorage.RepairDuplicates(cfg);
+                    await store.NormalizeWorkshopModPathsAsync(cfg);
+                }
 
-        var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
-        var lowercased = ModFileRepair.MakeLowercase(mods);
-        if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
-        await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
-        runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir);
-        return Results.Json(new { ok = true, pid = runtime.ProcessId, lowercased, checkedMods = workshopMods.Count });
+                var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
+                var lowercased = ModFileRepair.MakeLowercase(mods);
+                if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
+                await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
+                runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir, startup.ProfilesDir);
+            }
+            catch (Exception exception)
+            {
+                runtime.Push("stderr", $"Server start failed: {exception.Message}");
+            }
+        });
+
+        return Results.Json(new { accepted = true, checkedMods = workshopMods.Count }, statusCode: StatusCodes.Status202Accepted);
     }
 }

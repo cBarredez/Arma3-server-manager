@@ -1854,7 +1854,7 @@ function appendLog(entry) {
 
 function createLogLine(entry, includeTime = true) {
   const severity = logSeverity(entry);
-  const labels = { error: 'ERR', warning: 'WARN', success: 'OK', system: 'SYS', output: 'OUT' };
+  const labels = { error: 'ERR', warning: 'WARN', success: 'OK', system: 'SYS', output: 'OUT', rpt: 'RPT' };
   const line = document.createElement('span');
   line.className = 'log-line';
   if (includeTime) {
@@ -1881,6 +1881,7 @@ function logSeverity(entry) {
   if (/\b(warn|warning|advert|busy|retry|no connection|timeout|deprecated)\b/.test(text)) return 'warning';
   if (entry?.type === 'stderr') return 'warning';
   if (/\b(success|successful|downloaded|ready|started|connected|complete|completed|ok)\b/.test(text)) return 'success';
+  if (entry?.type === 'rpt') return 'rpt';
   if (entry?.type === 'system') return 'system';
   return 'output';
 }
