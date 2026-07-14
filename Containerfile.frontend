@@ -1,4 +1,5 @@
 FROM docker.io/library/node:24-alpine AS build
+LABEL project=arma3-manager
 WORKDIR /src
 COPY web/package.json web/package-lock.json ./
 RUN npm ci

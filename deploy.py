@@ -22,6 +22,7 @@ MANAGER_FILE = ROOT / "config" / "manager.toml"
 SECRETS_FILE = ROOT / "config" / "manager.secrets.toml"
 NETWORK = "arma3-net"
 PODMAN_SECRET = "arma3-manager-secrets"
+PROJECT_IMAGE_LABEL = "project=arma3-manager"
 
 
 @dataclass(frozen=True)
@@ -191,11 +192,18 @@ def build_image(target: Target, remote_dir: str, release: str, service: str) -> 
     image = f"localhost/arma3-manager-{service}:{release}"
     containerfile = "Containerfile.api" if service == "api" else "Containerfile.frontend"
     remote(target, ["podman", "build", "--file", f"{remote_dir}/{containerfile}", "--tag", image, remote_dir])
-    # Rebuilding under the same tag orphans the previous image as a dangling <none> layer set. Both
-    # Containerfiles label their final stage `project=arma3-manager`, so this prune only ever touches
-    # this project's own leftovers, never other containers/images sharing the host.
-    remote(target, ["podman", "image", "prune", "-f", "--filter", "label=project=arma3-manager"], check=False)
     return image
+
+
+def prune_project_images(target: Target) -> None:
+    """Remove only unused final images created by this manager's deploys."""
+    result = remote(
+        target,
+        ["podman", "image", "prune", "-a", "-f", "--filter", f"label={PROJECT_IMAGE_LABEL}"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit("Deployment is healthy, but unused Arma 3 Manager images could not be pruned")
 
 
 def current_image(target: Target, container: str) -> str | None:
@@ -288,6 +296,10 @@ def deploy(args: argparse.Namespace) -> int:
         replace(target, "arma3-frontend", image, frontend_command(image), current_image(target, "arma3-frontend"))
     elif args.backend:
         restart_frontend_proxy(target)
+    # Cleanup must run after every selected container has been replaced. Before this point the old
+    # image is still associated with a container and Podman correctly considers it in use. `-a`
+    # includes old release-tagged images; the label filter excludes every unrelated host image.
+    prune_project_images(target)
     print(f"Deployment {release} to {target.environment} completed")
     return 0
 
