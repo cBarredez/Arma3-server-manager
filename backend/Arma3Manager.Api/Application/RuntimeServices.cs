@@ -140,6 +140,8 @@ public sealed class RuntimeState(LogHub logHub)
 {
     Process? process;
     string? runId;
+    readonly List<Process> headlessClients = [];
+    CancellationTokenSource? rptCts;
     readonly SemaphoreSlim taskGate = new(1, 1);
     readonly HashSet<string> queuedTaskKeys = new(StringComparer.Ordinal);
 
@@ -164,20 +166,111 @@ public sealed class RuntimeState(LogHub logHub)
         get { lock (queuedTaskKeys) return taskGate.CurrentCount == 0 || queuedTaskKeys.Count > 0; }
     }
     public int? ProcessId => IsRunning ? process!.Id : null;
-
-    public void Start(string file, IEnumerable<string> arguments, string workingDirectory)
+    public int[] HeadlessClientPids
     {
+        get { lock (headlessClients) return headlessClients.Where(hc => hc is { HasExited: false }).Select(hc => hc.Id).ToArray(); }
+    }
+
+    public void Start(string file, IEnumerable<string> arguments, string workingDirectory, string? profilesDir = null)
+    {
+        var startedAtUtc = DateTime.UtcNow;
         var currentRunId = Guid.NewGuid().ToString("N");
         runId = currentRunId;
         var started = StartProcess(file, arguments, workingDirectory, source: "arma", runId: currentRunId);
         process = started;
         Push("system", $"Started {file} PID {started.Id}", "manager", currentRunId);
-        started.Exited += (_, _) => Push("system", $"Server exited with code {started.ExitCode}", "manager", currentRunId);
+        started.Exited += (_, _) =>
+        {
+            Push("system", $"Server exited with code {started.ExitCode}", "manager", currentRunId);
+            lock (headlessClients)
+            {
+                foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
+                headlessClients.Clear();
+            }
+        };
+
+        rptCts?.Cancel();
+        if (!string.IsNullOrWhiteSpace(profilesDir))
+        {
+            var cts = new CancellationTokenSource();
+            rptCts = cts;
+            _ = TailRptAsync(profilesDir, startedAtUtc, currentRunId, cts.Token);
+        }
     }
+
+    // Arma writes most connection/desync/addon-mismatch diagnostics to its .rpt report file in the profiles
+    // directory, not to stdout — so the console log alone misses kicks, BE actions, and network errors that
+    // explain "sometimes I can't connect" symptoms. This polls for the newest .rpt created after server start
+    // and streams new lines into the same log feed the panel already displays.
+    async Task TailRptAsync(string profilesDir, DateTime startedAtUtc, string runIdForRpt, CancellationToken ct)
+    {
+        string? currentFile = null;
+        long position = 0;
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (currentFile is null && Directory.Exists(profilesDir))
+                {
+                    var newest = Directory.EnumerateFiles(profilesDir, "*.rpt")
+                        .Select(path => new FileInfo(path))
+                        .Where(info => info.LastWriteTimeUtc >= startedAtUtc.AddSeconds(-5))
+                        .OrderByDescending(info => info.LastWriteTimeUtc)
+                        .FirstOrDefault();
+                    if (newest is not null)
+                    {
+                        currentFile = newest.FullName;
+                        position = 0;
+                        Push("system", $"Tailing RPT log: {newest.Name}", "manager", runIdForRpt);
+                    }
+                }
+                if (currentFile is not null && File.Exists(currentFile))
+                {
+                    await using var stream = new FileStream(currentFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    if (stream.Length < position) position = 0; // rotated/truncated
+                    stream.Seek(position, SeekOrigin.Begin);
+                    using var reader = new StreamReader(stream);
+                    string? line;
+                    while ((line = await reader.ReadLineAsync(ct)) is not null)
+                        Push("rpt", line, "arma", runIdForRpt);
+                    position = stream.Position;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // Transient IO error while Arma is mid-write; retry on the next tick.
+            }
+            try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { break; }
+        }
+    }
+
+    // Headless clients are additional instances of the same server binary launched in -client mode, connecting
+    // back to the main server over loopback to take over AI processing. They're started after the main server
+    // so they have something to connect to, and are tracked separately so Stop() always takes all of them down
+    // together — an orphaned HC process would otherwise keep running (and keep its slot on the server) after
+    // the panel reports the server as stopped.
+    public void StartHeadlessClient(string file, IEnumerable<string> arguments, string workingDirectory, int index)
+    {
+        var hc = StartProcess(file, arguments, workingDirectory, source: "arma", runId: runId);
+        lock (headlessClients) headlessClients.Add(hc);
+        Push("system", $"Started headless client {index} PID {hc.Id}", "manager", runId);
+        hc.Exited += (_, _) =>
+        {
+            lock (headlessClients) headlessClients.Remove(hc);
+            Push("system", $"Headless client {index} exited with code {hc.ExitCode}", "manager", runId);
+        };
+    }
+
     public void Stop()
     {
         if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
+        lock (headlessClients)
+        {
+            foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
+            headlessClients.Clear();
+        }
         Push("system", "Server stopped", "manager", runId);
+        rptCts?.Cancel();
     }
 
     public bool RunTask(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null, string? dedupeKey = null)
