@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Text;
 using Arma3Manager.Api.Contracts;
 using Arma3Manager.Api.Domain;
 using Arma3Manager.Api.Infrastructure;
@@ -8,40 +9,157 @@ namespace Arma3Manager.Api.Application;
 
 public sealed record TaskRunResult(int ExitCode, IReadOnlyList<string> Output);
 
-/// <summary>Owns the Arma process, serialized maintenance tasks, and bounded in-memory logs.</summary>
-public sealed class RuntimeState
+public sealed record LogReadResult(
+    IReadOnlyList<LogEntry> Entries,
+    bool HasGap,
+    long RequestedId,
+    long? OldestAvailableId,
+    long? NewestAvailableId);
+
+/// <summary>Thread-safe bounded history and notification source for the live log stream.</summary>
+public sealed class LogHub
 {
-    Process? process;
-    readonly List<Process> headlessClients = [];
-    CancellationTokenSource? rptCts;
-    readonly List<LogEntry> logs = [];
-    readonly SemaphoreSlim taskGate = new(1, 1);
-    readonly HashSet<string> queuedTaskKeys = new(StringComparer.Ordinal);
+    public const int DefaultCapacity = 5_000;
+    public const int MaxLineBytes = 64 * 1024;
+    const string TruncationSuffix = " … [truncated at 64 KiB]";
+
+    readonly LogEntry?[] entries;
+    readonly object gate = new();
+    int start;
+    int count;
     long nextLogId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
     TaskCompletionSource<bool> logSignal = NewLogSignal();
-    public IReadOnlyList<LogEntry> Logs
+
+    public LogHub() : this(DefaultCapacity) { }
+
+    public LogHub(int capacity)
     {
-        get { lock (logs) return logs.ToArray(); }
+        if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
+        entries = new LogEntry[capacity];
     }
 
-    public async Task<IReadOnlyList<LogEntry>> WaitForLogsAfterAsync(long id, TimeSpan timeout, CancellationToken ct)
+    public int Capacity => entries.Length;
+
+    public IReadOnlyList<LogEntry> Snapshot(int? limit = null)
+    {
+        lock (gate)
+        {
+            var take = Math.Min(count, Math.Max(0, limit ?? count));
+            var result = new LogEntry[take];
+            var skip = count - take;
+            for (var index = 0; index < take; index++)
+                result[index] = entries[(start + skip + index) % entries.Length]!;
+            return result;
+        }
+    }
+
+    public LogReadResult ReadAfter(long id)
+    {
+        lock (gate) return ReadAfterLocked(id);
+    }
+
+    public async Task<LogReadResult> WaitForAfterAsync(long id, TimeSpan timeout, CancellationToken ct)
     {
         Task signal;
-        lock (logs)
+        lock (gate)
         {
-            var pending = logs.Where(entry => entry.Id > id).ToArray();
-            if (pending.Length > 0) return pending;
+            var pending = ReadAfterLocked(id);
+            if (pending.Entries.Count > 0 || pending.HasGap) return pending;
             signal = logSignal.Task;
         }
 
         try { await signal.WaitAsync(timeout, ct); }
         catch (TimeoutException) { }
 
-        lock (logs) return logs.Where(entry => entry.Id > id).ToArray();
+        lock (gate) return ReadAfterLocked(id);
     }
 
     static TaskCompletionSource<bool> NewLogSignal() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public LogEntry Push(string type, string data, string source = "manager", string? runId = null)
+    {
+        TaskCompletionSource<bool> signal;
+        LogEntry entry;
+        lock (gate)
+        {
+            entry = new(type, Truncate(data ?? ""), DateTimeOffset.UtcNow, ++nextLogId, source, runId);
+            if (count < entries.Length)
+            {
+                entries[(start + count) % entries.Length] = entry;
+                count++;
+            }
+            else
+            {
+                entries[start] = entry;
+                start = (start + 1) % entries.Length;
+            }
+            signal = logSignal;
+            logSignal = NewLogSignal();
+        }
+        signal.TrySetResult(true);
+        return entry;
+    }
+
+    LogReadResult ReadAfterLocked(long id)
+    {
+        if (count == 0) return new([], false, id, null, null);
+
+        var oldest = entries[start]!.Id;
+        var newest = entries[(start + count - 1) % entries.Length]!.Id;
+        var hasGap = id > 0 && (id < oldest - 1 || id > newest);
+        var effectiveId = hasGap ? oldest - 1 : id;
+        var pending = new List<LogEntry>(count);
+        for (var index = 0; index < count; index++)
+        {
+            var entry = entries[(start + index) % entries.Length]!;
+            if (entry.Id > effectiveId) pending.Add(entry);
+        }
+        return new(pending, hasGap, id, oldest, newest);
+    }
+
+    static string Truncate(string value)
+    {
+        if (Encoding.UTF8.GetByteCount(value) <= MaxLineBytes) return value;
+        var budget = MaxLineBytes - Encoding.UTF8.GetByteCount(TruncationSuffix);
+        var low = 0;
+        var high = value.Length;
+        while (low < high)
+        {
+            var middle = low + (high - low + 1) / 2;
+            if (Encoding.UTF8.GetByteCount(value.AsSpan(0, middle)) <= budget) low = middle;
+            else high = middle - 1;
+        }
+        if (low < value.Length && low > 0 && char.IsHighSurrogate(value[low - 1]) && char.IsLowSurrogate(value[low])) low--;
+        return value[..low] + TruncationSuffix;
+    }
+}
+
+/// <summary>Owns the Arma process and serialized maintenance tasks.</summary>
+public sealed class RuntimeState(LogHub logHub)
+{
+    Process? process;
+    string? runId;
+    readonly List<Process> headlessClients = [];
+    CancellationTokenSource? rptCts;
+    readonly SemaphoreSlim taskGate = new(1, 1);
+    readonly HashSet<string> queuedTaskKeys = new(StringComparer.Ordinal);
+
+    public RuntimeState() : this(new LogHub()) { }
+    public IReadOnlyList<LogEntry> Logs => logHub.Snapshot();
+    public IReadOnlyList<LogEntry> GetLogs(int limit) => logHub.Snapshot(limit);
+    public string? RunId => runId;
+
+    public Task<IReadOnlyList<LogEntry>> WaitForLogsAfterAsync(long id, TimeSpan timeout, CancellationToken ct) =>
+        WaitForEntriesAsync(id, timeout, ct);
+
+    async Task<IReadOnlyList<LogEntry>> WaitForEntriesAsync(long id, TimeSpan timeout, CancellationToken ct) =>
+        (await logHub.WaitForAfterAsync(id, timeout, ct)).Entries;
+
+    public LogReadResult ReadLogsAfter(long id) => logHub.ReadAfter(id);
+    public Task<LogReadResult> WaitForLogReadAsync(long id, TimeSpan timeout, CancellationToken ct) =>
+        logHub.WaitForAfterAsync(id, timeout, ct);
+
     public bool IsRunning => process is { HasExited: false };
     public bool IsMaintenanceBusy
     {
@@ -56,11 +174,14 @@ public sealed class RuntimeState
     public void Start(string file, IEnumerable<string> arguments, string workingDirectory, string? profilesDir = null)
     {
         var startedAtUtc = DateTime.UtcNow;
-        process = StartProcess(file, arguments, workingDirectory);
-        Push("system", $"Started {file} PID {process.Id}");
-        process.Exited += (_, _) =>
+        var currentRunId = Guid.NewGuid().ToString("N");
+        runId = currentRunId;
+        var started = StartProcess(file, arguments, workingDirectory, source: "arma", runId: currentRunId);
+        process = started;
+        Push("system", $"Started {file} PID {started.Id}", "manager", currentRunId);
+        started.Exited += (_, _) =>
         {
-            Push("system", $"Server exited with code {process.ExitCode}");
+            Push("system", $"Server exited with code {started.ExitCode}", "manager", currentRunId);
             lock (headlessClients)
             {
                 foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
@@ -73,43 +194,15 @@ public sealed class RuntimeState
         {
             var cts = new CancellationTokenSource();
             rptCts = cts;
-            _ = TailRptAsync(profilesDir, startedAtUtc, cts.Token);
+            _ = TailRptAsync(profilesDir, startedAtUtc, currentRunId, cts.Token);
         }
-    }
-    // Headless clients are additional instances of the same server binary launched in -client mode, connecting
-    // back to the main server over loopback to take over AI processing. They're started after the main server
-    // so they have something to connect to, and are tracked separately so Stop() always takes all of them down
-    // together — an orphaned HC process would otherwise keep running (and keep its slot on the server) after
-    // the panel reports the server as stopped.
-    public void StartHeadlessClient(string file, IEnumerable<string> arguments, string workingDirectory, int index)
-    {
-        var hc = StartProcess(file, arguments, workingDirectory);
-        lock (headlessClients) headlessClients.Add(hc);
-        Push("system", $"Started headless client {index} PID {hc.Id}");
-        hc.Exited += (_, _) =>
-        {
-            lock (headlessClients) headlessClients.Remove(hc);
-            Push("system", $"Headless client {index} exited with code {hc.ExitCode}");
-        };
-    }
-
-    public void Stop()
-    {
-        if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
-        lock (headlessClients)
-        {
-            foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
-            headlessClients.Clear();
-        }
-        Push("system", "Server stopped");
-        rptCts?.Cancel();
     }
 
     // Arma writes most connection/desync/addon-mismatch diagnostics to its .rpt report file in the profiles
     // directory, not to stdout — so the console log alone misses kicks, BE actions, and network errors that
     // explain "sometimes I can't connect" symptoms. This polls for the newest .rpt created after server start
     // and streams new lines into the same log feed the panel already displays.
-    async Task TailRptAsync(string profilesDir, DateTime startedAtUtc, CancellationToken ct)
+    async Task TailRptAsync(string profilesDir, DateTime startedAtUtc, string runIdForRpt, CancellationToken ct)
     {
         string? currentFile = null;
         long position = 0;
@@ -128,7 +221,7 @@ public sealed class RuntimeState
                     {
                         currentFile = newest.FullName;
                         position = 0;
-                        Push("system", $"Tailing RPT log: {newest.Name}");
+                        Push("system", $"Tailing RPT log: {newest.Name}", "manager", runIdForRpt);
                     }
                 }
                 if (currentFile is not null && File.Exists(currentFile))
@@ -139,7 +232,7 @@ public sealed class RuntimeState
                     using var reader = new StreamReader(stream);
                     string? line;
                     while ((line = await reader.ReadLineAsync(ct)) is not null)
-                        Push("rpt", line);
+                        Push("rpt", line, "arma", runIdForRpt);
                     position = stream.Position;
                 }
             }
@@ -150,6 +243,36 @@ public sealed class RuntimeState
             try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { break; }
         }
     }
+
+    // Headless clients are additional instances of the same server binary launched in -client mode, connecting
+    // back to the main server over loopback to take over AI processing. They're started after the main server
+    // so they have something to connect to, and are tracked separately so Stop() always takes all of them down
+    // together — an orphaned HC process would otherwise keep running (and keep its slot on the server) after
+    // the panel reports the server as stopped.
+    public void StartHeadlessClient(string file, IEnumerable<string> arguments, string workingDirectory, int index)
+    {
+        var hc = StartProcess(file, arguments, workingDirectory, source: "arma", runId: runId);
+        lock (headlessClients) headlessClients.Add(hc);
+        Push("system", $"Started headless client {index} PID {hc.Id}", "manager", runId);
+        hc.Exited += (_, _) =>
+        {
+            lock (headlessClients) headlessClients.Remove(hc);
+            Push("system", $"Headless client {index} exited with code {hc.ExitCode}", "manager", runId);
+        };
+    }
+
+    public void Stop()
+    {
+        if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
+        lock (headlessClients)
+        {
+            foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
+            headlessClients.Clear();
+        }
+        Push("system", "Server stopped", "manager", runId);
+        rptCts?.Cancel();
+    }
+
     public bool RunTask(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null, string? dedupeKey = null)
     {
         var key = dedupeKey ?? kind;
@@ -180,17 +303,17 @@ public sealed class RuntimeState
         await taskGate.WaitAsync();
         try
         {
-            using var task = StartProcess(file, captured, Directory.GetCurrentDirectory(), output.Enqueue);
-            Push("system", $"Task {kind} started PID {task.Id}");
-            Push("system", $"Command: {CommandLog.Format(file, RedactSteamArgs(captured))}");
+            using var task = StartProcess(file, captured, Directory.GetCurrentDirectory(), output.Enqueue, "steamcmd");
+            Push("system", $"Task {kind} started PID {task.Id}", "steamcmd");
+            Push("system", $"Command: {CommandLog.Format(file, RedactSteamArgs(captured))}", "steamcmd");
             await task.WaitForExitAsync();
-            Push("system", $"Task {kind} exited with code {task.ExitCode}");
+            Push("system", $"Task {kind} exited with code {task.ExitCode}", "steamcmd");
             if (onExit is not null) await onExit(task.ExitCode);
             return new(task.ExitCode, output.ToArray());
         }
         catch (Exception exception)
         {
-            Push("stderr", $"Task {kind} failed: {exception.Message}");
+            Push("stderr", $"Task {kind} failed: {exception.Message}", "steamcmd");
             return new(-1, output.ToArray());
         }
         finally { taskGate.Release(); }
@@ -205,27 +328,17 @@ public sealed class RuntimeState
             yield return redacting ? "***" : argument;
         }
     }
-    Process StartProcess(string file, IEnumerable<string> arguments, string workingDirectory, Action<string>? observe = null)
+    Process StartProcess(string file, IEnumerable<string> arguments, string workingDirectory, Action<string>? observe = null, string source = "manager", string? runId = null)
     {
         var child = new Process { StartInfo = new(file) { WorkingDirectory = workingDirectory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true }, EnableRaisingEvents = true };
         foreach (var argument in arguments) child.StartInfo.ArgumentList.Add(argument);
-        child.OutputDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) { observe?.Invoke(eventArgs.Data); Push("stdout", eventArgs.Data); } };
-        child.ErrorDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) { observe?.Invoke(eventArgs.Data); Push("stderr", eventArgs.Data); } };
+        child.OutputDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) { observe?.Invoke(eventArgs.Data); Push("stdout", eventArgs.Data, source, runId); } };
+        child.ErrorDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) { observe?.Invoke(eventArgs.Data); Push("stderr", eventArgs.Data, source, runId); } };
         child.Start(); child.BeginOutputReadLine(); child.BeginErrorReadLine();
         return child;
     }
-    public void Push(string type, string data)
-    {
-        TaskCompletionSource<bool> signal;
-        lock (logs)
-        {
-            logs.Add(new(type, data, DateTimeOffset.UtcNow, ++nextLogId));
-            if (logs.Count > 1000) logs.RemoveAt(0);
-            signal = logSignal;
-            logSignal = NewLogSignal();
-        }
-        signal.TrySetResult(true);
-    }
+    public LogEntry Push(string type, string data, string source = "manager", string? runId = null) =>
+        logHub.Push(type, data, source, runId);
 }
 
 /// <summary>Interactive SteamCMD login session including Steam Guard input.</summary>
@@ -286,7 +399,7 @@ public sealed class SteamCmdSession(ServerPaths paths)
     public void Cancel() { if (process is { HasExited: false }) process.Kill(entireProcessTree: true); }
     void Push(string type, string data)
     {
-        logs.Add(new(type, data, DateTimeOffset.UtcNow));
+        logs.Add(new(type, data, DateTimeOffset.UtcNow, Source: "steamcmd"));
         if (logs.Count > 300) logs.RemoveAt(0);
         var text = data.ToLowerInvariant();
         if (text.Contains("steam guard") || text.Contains("two-factor") || text.Contains("auth code") || text.Contains("password:")) awaitingInput = true;

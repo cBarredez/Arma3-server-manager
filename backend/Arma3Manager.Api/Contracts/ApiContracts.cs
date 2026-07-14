@@ -6,7 +6,13 @@ public sealed record SteamAuth(string Username, DateTimeOffset UpdatedAt);
 public sealed record ModlistState(string? ActiveModlistId, List<Modlist> Lists);
 public sealed record Modlist(string Id, string Name, List<PresetMod> Mods, DateTimeOffset CreatedAt);
 public sealed record PresetMod(string Name, string WorkshopId, bool Installed = false);
-public sealed record LogEntry(string Type, string Data, DateTimeOffset Ts, long Id = 0);
+public sealed record LogEntry(
+    string Type,
+    string Data,
+    DateTimeOffset Ts,
+    long Id = 0,
+    string Source = "manager",
+    string? RunId = null);
 public sealed record FileItem(string Name, string Path, bool IsDir, long Size, DateTime Modified, DateTime? Created = null);
 public sealed record FileIndexRow(string Path, string Parent, string Name, bool IsDir, long Size, DateTime Created, DateTime MTime, long ScanGen);
 public sealed record SavedPresetFile(string Name, string Path, long Size, DateTime Modified);

@@ -1,4 +1,5 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+LABEL project=arma3-manager
 WORKDIR /src
 COPY backend/Arma3Manager.Api/Arma3Manager.Api.csproj backend/Arma3Manager.Api/
 RUN dotnet restore backend/Arma3Manager.Api/Arma3Manager.Api.csproj

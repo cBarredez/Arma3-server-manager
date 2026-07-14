@@ -375,7 +375,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
       <!-- ── CONFIG EDITOR ──────────────────────────────────────── -->
       <div id="view-config" class="view d-none">
         <div class="card-panel mb-3">
-          <div class="panel-header d-flex justify-content-between align-items-center">
+          <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
             <span><i class="fa fa-terminal me-2"></i>Startup Command</span>
             <button id="btn-copy-startup-command" class="btn btn-sm btn-outline-primary">
               <i class="fa fa-copy me-1"></i>Copy
@@ -439,12 +439,15 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
       <!-- ── LOGS ───────────────────────────────────────────────── -->
       <div id="view-logs" class="view d-none">
         <div class="card-panel">
-          <div class="panel-header d-flex justify-content-between align-items-center">
+          <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
             <span class="d-flex align-items-center gap-2">
               <span><i class="fa fa-terminal me-2"></i>Server Logs</span>
               <span id="log-stream-status" class="badge text-bg-secondary">Connecting</span>
             </span>
-            <div class="d-flex gap-2">
+            <div class="d-flex align-items-center flex-wrap gap-2">
+              <button id="log-new-lines" type="button" class="log-new-lines d-none">
+                <span id="log-new-lines-count">0</span> new · Jump to live
+              </button>
               <label class="form-check form-switch mb-0 align-items-center d-flex gap-2">
                 <input class="form-check-input" type="checkbox" id="log-autoscroll" checked />
                 <span class="form-check-label small">Auto-scroll</span>
@@ -454,6 +457,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
               </button>
             </div>
           </div>
+          <div id="log-stream-notice" class="log-stream-notice d-none" role="status" aria-live="polite"></div>
           <pre id="log-output" class="log-box mt-2"></pre>
         </div>
       </div>
