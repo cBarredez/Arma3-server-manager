@@ -151,6 +151,18 @@ public sealed class PlayerActivityTests
     }
 
     [Fact]
+    public void IgnoresHeadlessClientWrongPasswordButKeepsServerRejection()
+    {
+        const string message = "21:37:15 Cannot join the session. Wrong password was given.";
+        var headless = new LogEntry("stderr", message, DateTimeOffset.UtcNow, Source: "headless-client-1", RunId: "run-1");
+        var server = headless with { Source = "arma" };
+
+        Assert.False(PlayerSignalParser.TryParse(headless, out _));
+        Assert.True(PlayerSignalParser.TryParse(server, out var signal));
+        Assert.Equal("wrong_password", signal!.ReasonCode);
+    }
+
+    [Fact]
     public void StructuredStdoutAndQuotedRptCopiesShareADedupeFingerprint()
     {
         var at = DateTimeOffset.FromUnixTimeSeconds(1_800_000_001);
@@ -257,6 +269,44 @@ public sealed class PlayerActivityTests
         await store.InitAsync();
 
         Assert.Empty((await store.GetPlayerConnectionsAsync("run-1", null, null, null, null, 50)).Items);
+    }
+
+    [Fact]
+    public async Task V3MigrationRemovesOnlyAnonymousHeadlessPasswordArtifact()
+    {
+        using var directory = new TemporaryDirectory();
+        var dbPath = Path.Combine(directory.Path, "manager.sqlite3");
+        var store = new SqliteStore(dbPath);
+        await store.InitAsync();
+        var started = DateTimeOffset.UtcNow;
+        await store.StartServerSessionAsync(new("run-1", started, 123));
+        await store.ApplyPlayerSignalAsync(new PlayerSignal(
+            "run-1", started.AddSeconds(1), "rejected", "arma", "inferred",
+            "22:18:05 Cannot join the session. Wrong password was given.", "hc-artifact",
+            ReasonCode: "wrong_password", ReasonText: "Cannot join the session. Wrong password was given.", Terminal: true));
+        await store.ApplyPlayerSignalAsync(new PlayerSignal(
+            "run-1", started.AddSeconds(2), "rejected", "arma", "inferred",
+            "Cannot join the session. Wrong password was given.", "identified-player",
+            SteamUid: "76561198000000000", Name: "Alpha", ReasonCode: "wrong_password", Terminal: true));
+        await store.ApplyPlayerSignalAsync(new PlayerSignal(
+            "run-1", started.AddSeconds(3), "rejected", "arma", "inferred",
+            "Password validation failed for another reason", "different-message",
+            ReasonCode: "wrong_password", ReasonText: "Password validation failed for another reason", Terminal: true));
+
+        await using (var connection = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync();
+            var resetMigration = connection.CreateCommand();
+            resetMigration.CommandText = "delete from schema_migrations where version=3";
+            await resetMigration.ExecuteNonQueryAsync();
+        }
+
+        await store.InitAsync();
+
+        var remaining = (await store.GetPlayerConnectionsAsync("run-1", null, null, null, null, 50)).Items;
+        Assert.Equal(2, remaining.Count);
+        Assert.Contains(remaining, connection => connection.SteamUid == "76561198000000000");
+        Assert.Contains(remaining, connection => connection.ReasonText == "Password validation failed for another reason");
     }
 
     static int Count(string value, string needle) => (value.Length - value.Replace(needle, "").Length) / needle.Length;
