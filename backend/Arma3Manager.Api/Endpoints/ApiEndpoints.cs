@@ -883,6 +883,7 @@ public static class ApiEndpoints
                 var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
                 var lowercased = ModFileRepair.MakeLowercase(mods);
                 if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
+                await ServerCfgWriter.ApplyAsync(startup);
                 await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
                 var instrumentation = await ServerCfgInstrumentation.ApplyAsync(startup.ServerCfg);
                 activity.ReportInstrumentation(instrumentation);

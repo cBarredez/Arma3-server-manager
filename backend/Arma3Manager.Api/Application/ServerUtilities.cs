@@ -36,6 +36,7 @@ public static class CommandBuilder
         yield return "-client";
         yield return "-connect=127.0.0.1";
         yield return $"-port={settings.Port}";
+        if (!string.IsNullOrWhiteSpace(settings.ServerPassword)) yield return $"-password={settings.ServerPassword}";
         yield return $"-cfg={settings.BasicCfg}";
         yield return $"-profiles={profilesDir}";
         yield return $"-name=hc{index}";
@@ -233,7 +234,31 @@ public static class ServerCfgWriter
         var text = await File.ReadAllTextAsync(settings.ServerCfg);
         if (settings.MaxPlayers is not null) text = Regex.Replace(text, @"maxPlayers\s*=\s*\d+\s*;", $"maxPlayers = {settings.MaxPlayers};");
         if (settings.ServerPassword is not null) text = Regex.Replace(text, @"password\s*=\s*""[^""]*""\s*;", $"password = \"{settings.ServerPassword}\";");
+        if (settings.HeadlessClients > 0)
+        {
+            text = EnsureArrayValue(text, "headlessClients", "127.0.0.1");
+            text = EnsureArrayValue(text, "localClient", "127.0.0.1");
+        }
         await File.WriteAllTextAsync(settings.ServerCfg, text);
+    }
+
+    static string EnsureArrayValue(string text, string setting, string value)
+    {
+        var pattern = $@"(?im)^(?<prefix>\s*{Regex.Escape(setting)}\s*\[\s*\]\s*=\s*\{{)(?<values>[^}}]*)(?<suffix>\}}\s*;)";
+        var match = Regex.Match(text, pattern);
+        if (!match.Success)
+        {
+            var separator = text.Length == 0 || text.EndsWith('\n') ? "" : Environment.NewLine;
+            return $"{text}{separator}{setting}[] = {{ \"{value}\" }};{Environment.NewLine}";
+        }
+
+        var values = match.Groups["values"].Value;
+        if (Regex.IsMatch(values, $"\"\\s*{Regex.Escape(value)}\\s*\"", RegexOptions.IgnoreCase)) return text;
+        var trimmed = values.TrimEnd();
+        var addition = string.IsNullOrWhiteSpace(trimmed)
+            ? $" \"{value}\" "
+            : $"{trimmed.TrimEnd(',')}, \"{value}\" ";
+        return text[..match.Groups["values"].Index] + addition + text[(match.Groups["values"].Index + match.Groups["values"].Length)..];
     }
 }
 
