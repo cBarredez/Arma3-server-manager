@@ -29,6 +29,7 @@ public sealed class LogHub
     int count;
     long nextLogId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
     TaskCompletionSource<bool> logSignal = NewLogSignal();
+    public event Action<LogEntry>? EntryPushed;
 
     public LogHub() : this(DefaultCapacity) { }
 
@@ -98,6 +99,7 @@ public sealed class LogHub
             logSignal = NewLogSignal();
         }
         signal.TrySetResult(true);
+        EntryPushed?.Invoke(entry);
         return entry;
     }
 
@@ -140,6 +142,8 @@ public sealed class RuntimeState(LogHub logHub)
 {
     Process? process;
     string? runId;
+    readonly Dictionary<string, string> requestedEndReasons = new(StringComparer.Ordinal);
+    readonly HashSet<string> endedRuns = new(StringComparer.Ordinal);
     readonly List<Process> headlessClients = [];
     CancellationTokenSource? rptCts;
     readonly SemaphoreSlim taskGate = new(1, 1);
@@ -149,6 +153,8 @@ public sealed class RuntimeState(LogHub logHub)
     public IReadOnlyList<LogEntry> Logs => logHub.Snapshot();
     public IReadOnlyList<LogEntry> GetLogs(int limit) => logHub.Snapshot(limit);
     public string? RunId => runId;
+    public event Action<ServerRunStarted>? RunStarted;
+    public event Action<ServerRunEnded>? RunEnded;
 
     public Task<IReadOnlyList<LogEntry>> WaitForLogsAfterAsync(long id, TimeSpan timeout, CancellationToken ct) =>
         WaitForEntriesAsync(id, timeout, ct);
@@ -178,10 +184,23 @@ public sealed class RuntimeState(LogHub logHub)
         runId = currentRunId;
         var started = StartProcess(file, arguments, workingDirectory, source: "arma", runId: currentRunId);
         process = started;
+        RunStarted?.Invoke(new(currentRunId, DateTimeOffset.UtcNow, started.Id));
         Push("system", $"Started {file} PID {started.Id}", "manager", currentRunId);
         started.Exited += (_, _) =>
         {
             Push("system", $"Server exited with code {started.ExitCode}", "manager", currentRunId);
+            string reason;
+            lock (requestedEndReasons)
+            {
+                reason = requestedEndReasons.Remove(currentRunId, out var requested)
+                    ? requested
+                    : started.ExitCode == 0 ? "process_exit" : "crash";
+            }
+            lock (endedRuns)
+            {
+                if (endedRuns.Add(currentRunId))
+                    RunEnded?.Invoke(new(currentRunId, DateTimeOffset.UtcNow, started.ExitCode, reason));
+            }
             lock (headlessClients)
             {
                 foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
@@ -261,8 +280,10 @@ public sealed class RuntimeState(LogHub logHub)
         };
     }
 
-    public void Stop()
+    public void Stop(string reason = "stopped")
     {
+        if (runId is not null)
+            lock (requestedEndReasons) requestedEndReasons[runId] = reason;
         if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
         lock (headlessClients)
         {
@@ -271,6 +292,15 @@ public sealed class RuntimeState(LogHub logHub)
         }
         Push("system", "Server stopped", "manager", runId);
         rptCts?.Cancel();
+    }
+
+    public async Task StopAsync(string reason = "stopped", CancellationToken ct = default)
+    {
+        var stopping = process;
+        Stop(reason);
+        if (stopping is null || stopping.HasExited) return;
+        try { await stopping.WaitForExitAsync(ct).WaitAsync(TimeSpan.FromSeconds(15), ct); }
+        catch (TimeoutException) { Push("stderr", "Timed out waiting for the server process to stop", "manager", runId); }
     }
 
     public bool RunTask(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null, string? dedupeKey = null)

@@ -141,35 +141,35 @@ public static class ApiEndpoints
             return Results.Json(new { ok = true, selected = mission.Template });
         });
         
-        api.MapGet("/server/status", async (RuntimeState runtime) =>
+        api.MapGet("/server/status", async (RuntimeState runtime, PlayerActivityService activity) =>
         {
             var startup = await store.GetStartupAsync(paths, cfg);
             var joinHost = !string.IsNullOrWhiteSpace(cfg.PublicJoinHost)
                 ? cfg.PublicJoinHost
                 : Uri.TryCreate(cfg.BaseUrl, UriKind.Absolute, out var baseUri) ? baseUri.Host : "";
-            return Results.Json(new { running = runtime.IsRunning, pid = runtime.ProcessId, port = startup.Port, joinHost, headlessClientPids = runtime.HeadlessClientPids });
+            return Results.Json(new { running = runtime.IsRunning, pid = runtime.ProcessId, runId = runtime.RunId, port = startup.Port, joinHost, headlessClientPids = runtime.HeadlessClientPids, playerTracking = activity.State });
         });
         
-        api.MapPost("/server/start", async (RuntimeState runtime) =>
+        api.MapPost("/server/start", async (RuntimeState runtime, PlayerActivityService activity) =>
         {
             if (runtime.IsRunning) return Results.Json(new { error = "Server is already running" }, statusCode: 400);
-            return await StartServerAsync(cfg, paths, store, runtime);
+            return await StartServerAsync(cfg, paths, store, runtime, activity);
         });
 
         api.MapPost("/server/stop", async (RuntimeState runtime, BattlEyeRconClient rcon) =>
         {
             if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
-            runtime.Stop();
+            await runtime.StopAsync("stopped");
             await rcon.DisconnectAsync();
             return Results.Json(new { ok = true });
         });
 
-        api.MapPost("/server/restart", async (RuntimeState runtime, BattlEyeRconClient rcon) =>
+        api.MapPost("/server/restart", async (RuntimeState runtime, BattlEyeRconClient rcon, PlayerActivityService activity) =>
         {
-            if (runtime.IsRunning) runtime.Stop();
+            if (runtime.IsRunning) await runtime.StopAsync("restarted");
             await rcon.DisconnectAsync();
             await Task.Delay(1000);
-            return await StartServerAsync(cfg, paths, store, runtime);
+            return await StartServerAsync(cfg, paths, store, runtime, activity);
         });
 
         api.MapPost("/server/rcon/command", async (RconCommandRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
@@ -193,19 +193,46 @@ public static class ApiEndpoints
             catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
         });
 
-        api.MapPost("/server/rcon/kick", async (RconKickRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
+        api.MapPost("/server/rcon/kick", async (HttpContext http, RconKickRequest req, RuntimeState runtime, BattlEyeRconClient rcon, PlayerActivityService activity) =>
         {
             if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
-            try { return Results.Json(new { ok = true, response = await rcon.KickAsync(req.PlayerId, req.Reason) }); }
+            try
+            {
+                var player = (await rcon.GetPlayersAsync()).FirstOrDefault(item => item.Id == req.PlayerId);
+                var response = await rcon.KickAsync(req.PlayerId, req.Reason);
+                activity.RecordManagerAction("kicked", player, req.Reason, response, LogicalOperator(http));
+                return Results.Json(new { ok = true, response });
+            }
             catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
         });
 
-        api.MapPost("/server/rcon/ban", async (RconBanRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
+        api.MapPost("/server/rcon/ban", async (HttpContext http, RconBanRequest req, RuntimeState runtime, BattlEyeRconClient rcon, PlayerActivityService activity) =>
         {
             if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
-            try { return Results.Json(new { ok = true, response = await rcon.BanAsync(req.PlayerId, req.Minutes, req.Reason) }); }
+            try
+            {
+                var player = (await rcon.GetPlayersAsync()).FirstOrDefault(item => item.Id == req.PlayerId);
+                var response = await rcon.BanAsync(req.PlayerId, req.Minutes, req.Reason);
+                activity.RecordManagerAction("banned", player, req.Reason, response, LogicalOperator(http));
+                return Results.Json(new { ok = true, response });
+            }
             catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
         });
+
+        api.MapGet("/sessions", async (DateTimeOffset? from, DateTimeOffset? to, string? status, string? cursor, int? limit) =>
+            Results.Json(await store.GetServerSessionsAsync(from, to, status, cursor, limit ?? 25)));
+
+        api.MapGet("/sessions/{runId}", async (string runId) =>
+        {
+            var session = await store.GetServerSessionAsync(runId);
+            return session is null ? Results.Json(new { error = "Session not found" }, statusCode: 404) : Results.Json(session);
+        });
+
+        api.MapGet("/player-connections", async (string? runId, string? outcome, string? reasonCode, string? q, string? cursor, int? limit) =>
+            Results.Json(await store.GetPlayerConnectionsAsync(runId, outcome, reasonCode, q, cursor, limit ?? 50)));
+
+        api.MapGet("/player-connections/{id:long}/events", async (long id) =>
+            Results.Json(await store.GetPlayerEventsAsync(id)));
 
         api.MapPost("/server/install", async (RuntimeState runtime) =>
         {
@@ -592,6 +619,14 @@ public static class ApiEndpoints
     static bool IsAuthed(HttpContext http, AppConfig cfg) =>
         http.Session.GetString("authenticated") == "true" &&
         SessionProof.Verify(cfg.SessionSecret, http.Session.GetString("authProof"));
+
+    static string LogicalOperator(HttpContext http)
+    {
+        var steamId = http.Session.GetString("steamId");
+        return !string.IsNullOrWhiteSpace(steamId)
+            ? $"steam:{steamId}"
+            : http.Session.GetString("authMethod") ?? "panel";
+    }
     
     static async ValueTask<object?> AuthFilter(EndpointFilterInvocationContext ctx, EndpointFilterDelegate next)
     {
@@ -806,7 +841,7 @@ public static class ApiEndpoints
     // so the HTTP request returns immediately instead of blocking until it's done. Previously the whole
     // sequence ran inline, and browsers/reverse proxies would drop the connection (499) long before it
     // finished, making the panel look hung even though the start was still progressing server-side.
-    static async Task<IResult> StartServerAsync(AppConfig cfg, ServerPaths paths, SqliteStore store, RuntimeState runtime)
+    static async Task<IResult> StartServerAsync(AppConfig cfg, ServerPaths paths, SqliteStore store, RuntimeState runtime, PlayerActivityService activity)
     {
         var startup = await store.GetStartupAsync(paths, cfg);
         var bin = Path.Combine(cfg.Arma3Dir, startup.ServerBinary);
@@ -848,6 +883,10 @@ public static class ApiEndpoints
                 var lowercased = ModFileRepair.MakeLowercase(mods);
                 if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
                 await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
+                var instrumentation = await ServerCfgInstrumentation.ApplyAsync(startup.ServerCfg);
+                activity.ReportInstrumentation(instrumentation);
+                if (!instrumentation.Complete)
+                    runtime.Push("stderr", $"Player tracking is partial: {string.Join("; ", instrumentation.Errors)}");
                 runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir, startup.ProfilesDir);
 
                 if (startup.HeadlessClients > 0)

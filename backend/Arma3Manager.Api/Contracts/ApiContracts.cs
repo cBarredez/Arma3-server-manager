@@ -42,3 +42,56 @@ public sealed record RconCommandRequest(string Command);
 public sealed record RconSayRequest(string Message);
 public sealed record RconKickRequest(int PlayerId, string? Reason);
 public sealed record RconBanRequest(int PlayerId, int Minutes, string? Reason);
+
+public sealed record ServerSessionSummary(
+    string RunId,
+    DateTimeOffset StartedAt,
+    DateTimeOffset? EndedAt,
+    int? Pid,
+    int? ExitCode,
+    string EndReason,
+    int Successful,
+    int Rejected,
+    int Removed,
+    int Pending,
+    int UniquePlayers);
+
+public sealed record PlayerConnectionRecord(
+    long Id,
+    string RunId,
+    DateTimeOffset FirstSeenAt,
+    DateTimeOffset? AdmittedAt,
+    DateTimeOffset? EndedAt,
+    string Outcome,
+    bool Active,
+    string? NetworkId,
+    string? SteamUid,
+    string? BattlEyeGuid,
+    int? RconPlayerId,
+    string? Name,
+    string? Ip,
+    string? ReasonCode,
+    string? ReasonText,
+    string Source,
+    string Confidence);
+
+public sealed record PlayerEventRecord(
+    long Id,
+    long? ConnectionId,
+    string RunId,
+    DateTimeOffset OccurredAt,
+    string Kind,
+    string? ReasonCode,
+    string? ReasonText,
+    string Source,
+    string Confidence,
+    string RawText);
+
+public sealed record PagedResult<T>(IReadOnlyList<T> Items, string? NextCursor);
+
+public sealed record PlayerTrackingState(
+    string Mode,
+    string[] Sources,
+    DateTimeOffset? LastEventAt,
+    string? LastError,
+    long DroppedCandidates = 0);

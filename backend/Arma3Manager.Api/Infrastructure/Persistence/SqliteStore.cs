@@ -13,7 +13,16 @@ public sealed class SqliteStore(string dbPath)
 {
     public string DbPath => dbPath;
     readonly JsonSerializerOptions json = new(JsonSerializerDefaults.Web);
-    SqliteConnection Open() { Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!); var connection = new SqliteConnection($"Data Source={dbPath}"); connection.Open(); return connection; }
+    SqliteConnection Open()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        var connection = new SqliteConnection($"Data Source={dbPath}");
+        connection.Open();
+        using var pragma = connection.CreateCommand();
+        pragma.CommandText = "pragma foreign_keys=on; pragma busy_timeout=5000;";
+        pragma.ExecuteNonQuery();
+        return connection;
+    }
 
     public async Task InitAsync()
     {
@@ -29,7 +38,46 @@ public sealed class SqliteStore(string dbPath)
         create index if not exists ix_file_index_parent on file_index(parent);
         create table if not exists metrics_samples (id integer primary key autoincrement, run_id text not null, sampled_at text not null, cpu_percent real null, cores_capacity real not null, memory_used_bytes integer not null, memory_percent real not null);
         create index if not exists ix_metrics_samples_run on metrics_samples(run_id, sampled_at);
+        create table if not exists schema_migrations (version integer primary key, applied_at text not null);
+        create table if not exists server_sessions (
+            run_id text primary key, started_at text not null, ended_at text null, pid integer null,
+            exit_code integer null, end_reason text not null default 'running', created_at text not null
+        );
+        create index if not exists ix_server_sessions_started on server_sessions(started_at desc, run_id);
+        create table if not exists player_connections (
+            id integer primary key autoincrement, run_id text not null references server_sessions(run_id) on delete cascade,
+            first_seen_at text not null, admitted_at text null, ended_at text null,
+            outcome text not null, active integer not null default 1,
+            network_id text null, steam_uid text null, battleye_guid text null, rcon_player_id integer null,
+            name text null, ip text null, reason_code text null, reason_text text null,
+            source text not null, confidence text not null
+        );
+        create index if not exists ix_player_connections_run on player_connections(run_id, first_seen_at desc, id desc);
+        create index if not exists ix_player_connections_filters on player_connections(run_id, outcome, reason_code);
+        create index if not exists ix_player_connections_network on player_connections(run_id, network_id);
+        create index if not exists ix_player_connections_guid on player_connections(run_id, battleye_guid);
+        create table if not exists player_events (
+            id integer primary key autoincrement, connection_id integer null references player_connections(id) on delete cascade,
+            run_id text not null references server_sessions(run_id) on delete cascade, occurred_at text not null,
+            kind text not null, reason_code text null, reason_text text null, source text not null,
+            confidence text not null, raw_text text not null, dedupe_key text not null unique
+        );
+        create index if not exists ix_player_events_connection on player_events(connection_id, occurred_at, id);
+        create index if not exists ix_player_events_run on player_events(run_id, occurred_at desc, id desc);
         """;
+        await command.ExecuteNonQueryAsync();
+        command.CommandText = "pragma journal_mode=wal;";
+        await command.ExecuteScalarAsync();
+        command.CommandText = """
+        insert or ignore into server_sessions(run_id,started_at,ended_at,pid,exit_code,end_reason,created_at)
+        select run_id,min(sampled_at),max(sampled_at),null,null,'legacy_inferred',min(sampled_at)
+        from metrics_samples group by run_id;
+        update server_sessions set ended_at=$now,end_reason='interrupted'
+        where ended_at is null and end_reason='running';
+        insert or ignore into schema_migrations(version,applied_at) values(1,$now);
+        """;
+        command.Parameters.Clear();
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         await command.ExecuteNonQueryAsync();
     }
 
@@ -114,6 +162,330 @@ public sealed class SqliteStore(string dbPath)
         command.Parameters.AddWithValue("$keep", keepSessions);
         await command.ExecuteNonQueryAsync();
     }
+
+    public async Task StartServerSessionAsync(ServerRunStarted run)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        insert into server_sessions(run_id,started_at,ended_at,pid,exit_code,end_reason,created_at)
+        values($run,$started,null,$pid,null,'running',$started)
+        on conflict(run_id) do update set started_at=excluded.started_at,ended_at=null,pid=excluded.pid,exit_code=null,end_reason='running'
+        """;
+        command.Parameters.AddWithValue("$run", run.RunId);
+        command.Parameters.AddWithValue("$started", run.StartedAt.ToString("O"));
+        command.Parameters.AddWithValue("$pid", run.Pid);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task EndServerSessionAsync(ServerRunEnded run)
+    {
+        await using var connection = Open();
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+        update server_sessions set ended_at=coalesce(ended_at,$ended),exit_code=coalesce(exit_code,$exit),
+            end_reason=case when end_reason='running' then $reason else end_reason end
+        where run_id=$run;
+        update player_connections set active=0,ended_at=coalesce(ended_at,$ended)
+        where run_id=$run and active=1;
+        """;
+        command.Parameters.AddWithValue("$run", run.RunId);
+        command.Parameters.AddWithValue("$ended", run.EndedAt.ToString("O"));
+        command.Parameters.AddWithValue("$exit", (object?)run.ExitCode ?? DBNull.Value);
+        command.Parameters.AddWithValue("$reason", run.Reason);
+        await command.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
+    public async Task<bool> ApplyPlayerSignalAsync(PlayerSignal signal)
+    {
+        return await ApplyPlayerSignalsAsync([signal]) == 1;
+    }
+
+    public async Task<int> ApplyPlayerSignalsAsync(IReadOnlyList<PlayerSignal> signals)
+    {
+        if (signals.Count == 0) return 0;
+        await using var connection = Open();
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+        var persisted = 0;
+        foreach (var signal in signals)
+            if (await ApplyPlayerSignalAsync(connection, transaction, signal)) persisted++;
+        await transaction.CommitAsync();
+        return persisted;
+    }
+
+    static async Task<bool> ApplyPlayerSignalAsync(SqliteConnection connection, SqliteTransaction transaction, PlayerSignal signal)
+    {
+        var dedupe = connection.CreateCommand();
+        dedupe.Transaction = transaction;
+        dedupe.CommandText = "select 1 from player_events where dedupe_key=$key limit 1";
+        dedupe.Parameters.AddWithValue("$key", signal.DedupeKey);
+        if (await dedupe.ExecuteScalarAsync() is not null) return false;
+
+        var ensureSession = connection.CreateCommand();
+        ensureSession.Transaction = transaction;
+        ensureSession.CommandText = """
+        insert or ignore into server_sessions(run_id,started_at,ended_at,pid,exit_code,end_reason,created_at)
+        values($run,$at,null,null,null,'running',$at)
+        """;
+        ensureSession.Parameters.AddWithValue("$run", signal.RunId);
+        ensureSession.Parameters.AddWithValue("$at", signal.OccurredAt.ToString("O"));
+        await ensureSession.ExecuteNonQueryAsync();
+
+        var existing = await FindConnectionAsync(connection, transaction, signal);
+        var outcome = PlayerOutcomes.Resolve(signal, existing);
+        var admittedAt = signal.Admitted || signal.Kind is "connected" or "rcon_seen"
+            ? signal.OccurredAt
+            : existing?.AdmittedAt;
+        var active = !signal.Terminal;
+        long connectionId;
+
+        if (existing is null)
+        {
+            var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+            insert into player_connections(run_id,first_seen_at,admitted_at,ended_at,outcome,active,
+                network_id,steam_uid,battleye_guid,rcon_player_id,name,ip,reason_code,reason_text,source,confidence)
+            values($run,$at,$admitted,$ended,$outcome,$active,$network,$steam,$guid,$rcon,$name,$ip,$reasonCode,$reasonText,$source,$confidence);
+            select last_insert_rowid();
+            """;
+            AddSignalParameters(insert, signal);
+            insert.Parameters.AddWithValue("$admitted", admittedAt is null ? DBNull.Value : admittedAt.Value.ToString("O"));
+            insert.Parameters.AddWithValue("$ended", signal.Terminal ? signal.OccurredAt.ToString("O") : DBNull.Value);
+            insert.Parameters.AddWithValue("$outcome", outcome);
+            insert.Parameters.AddWithValue("$active", active ? 1 : 0);
+            connectionId = (long)(await insert.ExecuteScalarAsync())!;
+        }
+        else
+        {
+            connectionId = existing.Id;
+            var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = """
+            update player_connections set
+                admitted_at=coalesce(admitted_at,$admitted), ended_at=case when $terminal=1 then $at else ended_at end,
+                outcome=$outcome, active=case when $terminal=1 then 0 else 1 end,
+                network_id=coalesce($network,network_id),steam_uid=coalesce($steam,steam_uid),
+                battleye_guid=coalesce($guid,battleye_guid),rcon_player_id=coalesce($rcon,rcon_player_id),
+                name=coalesce($name,name),ip=coalesce($ip,ip),
+                reason_code=coalesce($reasonCode,reason_code),reason_text=coalesce($reasonText,reason_text),
+                source=case when $confidence='authoritative' then $source else source end,
+                confidence=case when $confidence='authoritative' then $confidence else confidence end
+            where id=$id
+            """;
+            AddSignalParameters(update, signal);
+            update.Parameters.AddWithValue("$admitted", admittedAt is null ? DBNull.Value : admittedAt.Value.ToString("O"));
+            update.Parameters.AddWithValue("$terminal", signal.Terminal ? 1 : 0);
+            update.Parameters.AddWithValue("$outcome", outcome);
+            update.Parameters.AddWithValue("$id", connectionId);
+            await update.ExecuteNonQueryAsync();
+        }
+
+        var eventCommand = connection.CreateCommand();
+        eventCommand.Transaction = transaction;
+        eventCommand.CommandText = """
+        insert into player_events(connection_id,run_id,occurred_at,kind,reason_code,reason_text,source,confidence,raw_text,dedupe_key)
+        values($connection,$run,$at,$kind,$reasonCode,$reasonText,$source,$confidence,$raw,$key)
+        """;
+        eventCommand.Parameters.AddWithValue("$connection", connectionId);
+        eventCommand.Parameters.AddWithValue("$run", signal.RunId);
+        eventCommand.Parameters.AddWithValue("$at", signal.OccurredAt.ToString("O"));
+        eventCommand.Parameters.AddWithValue("$kind", signal.Kind);
+        eventCommand.Parameters.AddWithValue("$reasonCode", (object?)signal.ReasonCode ?? DBNull.Value);
+        eventCommand.Parameters.AddWithValue("$reasonText", (object?)signal.ReasonText ?? DBNull.Value);
+        eventCommand.Parameters.AddWithValue("$source", signal.Source);
+        eventCommand.Parameters.AddWithValue("$confidence", signal.Confidence);
+        eventCommand.Parameters.AddWithValue("$raw", signal.RawText);
+        eventCommand.Parameters.AddWithValue("$key", signal.DedupeKey);
+        await eventCommand.ExecuteNonQueryAsync();
+        return true;
+    }
+
+    static void AddSignalParameters(SqliteCommand command, PlayerSignal signal)
+    {
+        command.Parameters.AddWithValue("$run", signal.RunId);
+        command.Parameters.AddWithValue("$at", signal.OccurredAt.ToString("O"));
+        command.Parameters.AddWithValue("$network", (object?)signal.NetworkId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$steam", (object?)signal.SteamUid ?? DBNull.Value);
+        command.Parameters.AddWithValue("$guid", (object?)signal.BattlEyeGuid ?? DBNull.Value);
+        command.Parameters.AddWithValue("$rcon", (object?)signal.RconPlayerId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$name", (object?)signal.Name ?? DBNull.Value);
+        command.Parameters.AddWithValue("$ip", (object?)signal.Ip ?? DBNull.Value);
+        command.Parameters.AddWithValue("$reasonCode", (object?)signal.ReasonCode ?? DBNull.Value);
+        command.Parameters.AddWithValue("$reasonText", (object?)signal.ReasonText ?? DBNull.Value);
+        command.Parameters.AddWithValue("$source", signal.Source);
+        command.Parameters.AddWithValue("$confidence", signal.Confidence);
+    }
+
+    static async Task<PlayerConnectionRecord?> FindConnectionAsync(SqliteConnection connection, SqliteTransaction transaction, PlayerSignal signal)
+    {
+        var conditions = new List<string>();
+        if (!string.IsNullOrWhiteSpace(signal.NetworkId)) conditions.Add("network_id=$network");
+        if (!string.IsNullOrWhiteSpace(signal.SteamUid)) conditions.Add("steam_uid=$steam");
+        if (!string.IsNullOrWhiteSpace(signal.BattlEyeGuid)) conditions.Add("battleye_guid=$guid");
+        if (signal.RconPlayerId is not null) conditions.Add("rcon_player_id=$rcon");
+        if (!string.IsNullOrWhiteSpace(signal.Name) && !string.IsNullOrWhiteSpace(signal.Ip)) conditions.Add("(name=$name and ip=$ip)");
+        if (conditions.Count == 0) return null;
+
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        var terminalWindow = signal.Kind is "connected" or "rcon_seen"
+            ? "and active=1"
+            : "and (active=1 or ended_at >= $cutoff)";
+        command.CommandText = $"""
+        select id,run_id,first_seen_at,admitted_at,ended_at,outcome,active,network_id,steam_uid,battleye_guid,
+               rcon_player_id,name,ip,reason_code,reason_text,source,confidence
+        from player_connections where run_id=$run and ({string.Join(" or ", conditions)})
+        {terminalWindow}
+        order by active desc,first_seen_at desc,id desc limit 1
+        """;
+        AddSignalParameters(command, signal);
+        command.Parameters.AddWithValue("$cutoff", signal.OccurredAt.AddSeconds(-30).ToString("O"));
+        await using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync()) return ReadPlayerConnection(reader);
+        await reader.DisposeAsync();
+
+        // The early server hook only knows Arma's network id. Enrich it from RCon only when exactly one
+        // anonymous connection is waiting in the correlation window; ambiguity creates a separate record.
+        if (signal.Kind != "rcon_seen") return null;
+        var fallback = connection.CreateCommand();
+        fallback.Transaction = transaction;
+        fallback.CommandText = """
+        select id,run_id,first_seen_at,admitted_at,ended_at,outcome,active,network_id,steam_uid,battleye_guid,
+               rcon_player_id,name,ip,reason_code,reason_text,source,confidence
+        from player_connections where run_id=$run and active=1 and first_seen_at >= $cutoff
+          and battleye_guid is null and steam_uid is null and name is null and ip is null
+        order by first_seen_at desc,id desc limit 2
+        """;
+        fallback.Parameters.AddWithValue("$run", signal.RunId);
+        fallback.Parameters.AddWithValue("$cutoff", signal.OccurredAt.AddSeconds(-30).ToString("O"));
+        var candidates = new List<PlayerConnectionRecord>();
+        await using var fallbackReader = await fallback.ExecuteReaderAsync();
+        while (await fallbackReader.ReadAsync()) candidates.Add(ReadPlayerConnection(fallbackReader));
+        return candidates.Count == 1 ? candidates[0] : null;
+    }
+
+    public async Task<PagedResult<ServerSessionSummary>> GetServerSessionsAsync(DateTimeOffset? from, DateTimeOffset? to, string? status, string? cursor, int limit)
+    {
+        limit = Math.Clamp(limit, 1, 100);
+        var offset = int.TryParse(cursor, out var parsed) && parsed >= 0 ? parsed : 0;
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        var filters = new List<string>();
+        if (from is not null) filters.Add("s.started_at >= $from");
+        if (to is not null) filters.Add("s.started_at <= $to");
+        if (status == "running") filters.Add("s.ended_at is null");
+        else if (status == "ended") filters.Add("s.ended_at is not null");
+        command.CommandText = $"""
+        select s.run_id,s.started_at,s.ended_at,s.pid,s.exit_code,s.end_reason,
+          sum(case when p.outcome='successful' then 1 else 0 end),
+          sum(case when p.outcome='rejected' then 1 else 0 end),
+          sum(case when p.outcome='removed' then 1 else 0 end),
+          sum(case when p.outcome='pending' then 1 else 0 end),
+          count(distinct coalesce(p.steam_uid,p.battleye_guid,p.network_id,p.name,p.ip,cast(p.id as text)))
+        from server_sessions s left join player_connections p on p.run_id=s.run_id
+        {(filters.Count == 0 ? "" : "where " + string.Join(" and ", filters))}
+        group by s.run_id order by s.started_at desc,s.run_id desc limit $take offset $offset
+        """;
+        command.Parameters.AddWithValue("$take", limit + 1);
+        command.Parameters.AddWithValue("$offset", offset);
+        if (from is not null) command.Parameters.AddWithValue("$from", from.Value.ToString("O"));
+        if (to is not null) command.Parameters.AddWithValue("$to", to.Value.ToString("O"));
+        var results = new List<ServerSessionSummary>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) results.Add(ReadServerSession(reader));
+        var hasMore = results.Count > limit;
+        if (hasMore) results.RemoveAt(results.Count - 1);
+        return new(results, hasMore ? (offset + limit).ToString() : null);
+    }
+
+    public async Task<ServerSessionSummary?> GetServerSessionAsync(string runId)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        select s.run_id,s.started_at,s.ended_at,s.pid,s.exit_code,s.end_reason,
+          sum(case when p.outcome='successful' then 1 else 0 end),sum(case when p.outcome='rejected' then 1 else 0 end),
+          sum(case when p.outcome='removed' then 1 else 0 end),sum(case when p.outcome='pending' then 1 else 0 end),
+          count(distinct coalesce(p.steam_uid,p.battleye_guid,p.network_id,p.name,p.ip,cast(p.id as text)))
+        from server_sessions s left join player_connections p on p.run_id=s.run_id where s.run_id=$run group by s.run_id
+        """;
+        command.Parameters.AddWithValue("$run", runId);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadServerSession(reader) : null;
+    }
+
+    public async Task<PagedResult<PlayerConnectionRecord>> GetPlayerConnectionsAsync(string? runId, string? outcome, string? reasonCode, string? query, string? cursor, int limit)
+    {
+        limit = Math.Clamp(limit, 1, 100);
+        var offset = int.TryParse(cursor, out var parsed) && parsed >= 0 ? parsed : 0;
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        var filters = new List<string>();
+        if (!string.IsNullOrWhiteSpace(runId)) filters.Add("run_id=$run");
+        if (!string.IsNullOrWhiteSpace(outcome)) filters.Add("outcome=$outcome");
+        if (!string.IsNullOrWhiteSpace(reasonCode)) filters.Add("reason_code=$reason");
+        if (!string.IsNullOrWhiteSpace(query)) filters.Add("(name like $query or ip like $query or steam_uid like $query or battleye_guid like $query or reason_text like $query)");
+        command.CommandText = $"""
+        select id,run_id,first_seen_at,admitted_at,ended_at,outcome,active,network_id,steam_uid,battleye_guid,
+               rcon_player_id,name,ip,reason_code,reason_text,source,confidence
+        from player_connections {(filters.Count == 0 ? "" : "where " + string.Join(" and ", filters))}
+        order by first_seen_at desc,id desc limit $take offset $offset
+        """;
+        command.Parameters.AddWithValue("$take", limit + 1);
+        command.Parameters.AddWithValue("$offset", offset);
+        command.Parameters.AddWithValue("$run", runId ?? "");
+        command.Parameters.AddWithValue("$outcome", outcome ?? "");
+        command.Parameters.AddWithValue("$reason", reasonCode ?? "");
+        command.Parameters.AddWithValue("$query", $"%{query}%");
+        var results = new List<PlayerConnectionRecord>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) results.Add(ReadPlayerConnection(reader));
+        var hasMore = results.Count > limit;
+        if (hasMore) results.RemoveAt(results.Count - 1);
+        return new(results, hasMore ? (offset + limit).ToString() : null);
+    }
+
+    public async Task<List<PlayerEventRecord>> GetPlayerEventsAsync(long connectionId)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "select id,connection_id,run_id,occurred_at,kind,reason_code,reason_text,source,confidence,raw_text from player_events where connection_id=$id order by occurred_at,id";
+        command.Parameters.AddWithValue("$id", connectionId);
+        var results = new List<PlayerEventRecord>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) results.Add(new(reader.GetInt64(0), reader.IsDBNull(1) ? null : reader.GetInt64(1), reader.GetString(2), DateTimeOffset.Parse(reader.GetString(3)), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.GetString(7), reader.GetString(8), reader.GetString(9)));
+        return results;
+    }
+
+    public async Task PruneHistoryAsync(int retentionDays)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        delete from metrics_samples where sampled_at < $cutoff;
+        delete from server_sessions where coalesce(ended_at,started_at) < $cutoff;
+        """;
+        command.Parameters.AddWithValue("$cutoff", DateTimeOffset.UtcNow.AddDays(-retentionDays).ToString("O"));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    static ServerSessionSummary ReadServerSession(SqliteDataReader reader) => new(
+        reader.GetString(0), DateTimeOffset.Parse(reader.GetString(1)), reader.IsDBNull(2) ? null : DateTimeOffset.Parse(reader.GetString(2)),
+        reader.IsDBNull(3) ? null : reader.GetInt32(3), reader.IsDBNull(4) ? null : reader.GetInt32(4), reader.GetString(5),
+        reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetInt32(10));
+
+    static PlayerConnectionRecord ReadPlayerConnection(SqliteDataReader reader) => new(
+        reader.GetInt64(0), reader.GetString(1), DateTimeOffset.Parse(reader.GetString(2)),
+        reader.IsDBNull(3) ? null : DateTimeOffset.Parse(reader.GetString(3)), reader.IsDBNull(4) ? null : DateTimeOffset.Parse(reader.GetString(4)),
+        reader.GetString(5), reader.GetInt32(6) != 0, reader.IsDBNull(7) ? null : reader.GetString(7),
+        reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9),
+        reader.IsDBNull(10) ? null : reader.GetInt32(10), reader.IsDBNull(11) ? null : reader.GetString(11),
+        reader.IsDBNull(12) ? null : reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetString(13),
+        reader.IsDBNull(14) ? null : reader.GetString(14), reader.GetString(15), reader.GetString(16));
     public async Task<bool> EnsureFileIndexVersionAsync(int version)
     {
         var expected = version.ToString(System.Globalization.CultureInfo.InvariantCulture);

@@ -33,6 +33,8 @@ builder.Services.AddSingleton<RuntimeState>();
 builder.Services.AddSingleton<LogStreamService>();
 builder.Services.AddSingleton<SteamCmdSession>();
 builder.Services.AddSingleton<BattlEyeRconClient>();
+builder.Services.AddSingleton<PlayerActivityService>();
+builder.Services.AddHostedService(services => services.GetRequiredService<PlayerActivityService>());
 builder.Services.AddSingleton<MetricsSampler>();
 builder.Services.AddHostedService(services => services.GetRequiredService<MetricsSampler>());
 builder.Services.AddSingleton<FileIndexer>();

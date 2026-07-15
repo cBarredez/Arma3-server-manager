@@ -15,7 +15,7 @@ public sealed record MemoryMetrics(long Total, long Used, long Free, long Cache,
 /// <summary>Samples cumulative cgroup counters independently from HTTP polling, and — while a game session is
 /// running — records a lower-frequency history of those samples per RunId so CPU/RAM usage for a match can be
 /// reviewed or exported after the fact (issue: "Añadir métricas solicitadas").</summary>
-public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState runtime, SqliteStore store) : BackgroundService
+public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState runtime, SqliteStore store, AppConfig config) : BackgroundService
 {
     static readonly TimeSpan Interval = TimeSpan.FromSeconds(1);
     static readonly TimeSpan PersistInterval = TimeSpan.FromSeconds(5);
@@ -79,8 +79,8 @@ public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState 
 
     async Task PruneOldSessionsAsync()
     {
-        try { await store.PruneMetricsSessionsAsync(); }
-        catch (Exception exception) { logger.LogWarning(exception, "Unable to prune old metrics sessions"); }
+        try { await store.PruneHistoryAsync(config.HistoryRetentionDays); }
+        catch (Exception exception) { logger.LogWarning(exception, "Unable to prune expired session history"); }
     }
 }
 
