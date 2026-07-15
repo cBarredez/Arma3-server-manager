@@ -14,7 +14,7 @@ import {
   shouldStreamLogs,
   virtualLogRange,
 } from './log-viewer.js';
-import { buildPlayerQuery, connectionIdentity, friendlyReason } from './player-activity.js';
+import { buildPlayerQuery, connectionIdentity, friendlyReason, trackingFieldValue } from './player-activity.js';
 
 'use strict';
 
@@ -1928,6 +1928,7 @@ let playerHistoryAbort = null;
 let sessionHistoryAbort = null;
 let playerDetailModal = null;
 let playerSearchTimer = null;
+let playerTrackingAvailableFields = new Set();
 
 function initLogWorkspace() {
   if (logWorkspaceInitialized) return;
@@ -2027,12 +2028,15 @@ async function refreshPlayerTrackingStatus() {
   try {
     const status = await GET('/api/server/status');
     const tracking = status.playerTracking || {};
+    playerTrackingAvailableFields = new Set(tracking.availableFields || []);
     const full = tracking.mode === 'full';
+    const enriched = tracking.profile === 'battleye_enriched';
     chip.className = `tracking-chip ${full ? 'tracking-full' : 'tracking-partial'}`;
     chip.replaceChildren();
     const icon = document.createElement('i');
     icon.className = `fa ${full ? 'fa-shield-check' : 'fa-triangle-exclamation'}`;
-    chip.append(icon, document.createTextNode(full ? ' Full tracking' : ' Partial tracking'));
+    const label = full ? (enriched ? ' Enriched tracking' : ' Identity tracking') : ' Partial tracking';
+    chip.append(icon, document.createTextNode(label));
     chip.title = tracking.lastError || `Sources: ${(tracking.sources || []).join(', ')}`;
   } catch {
     chip.className = 'tracking-chip tracking-partial';
@@ -2213,11 +2217,11 @@ async function openPlayerDetail(connection) {
   body.replaceChildren();
   const grid = document.createElement('div');
   grid.className = 'player-detail-grid';
-  [['Outcome', connection.outcome], ['IP address', connection.ip], ['BattlEye GUID', connection.battlEyeGuid], ['Steam UID', connection.steamUid], ['Network ID', connection.networkId], ['Confidence', connection.confidence]].forEach(([label, value]) => {
+  [['Outcome', 'outcome', connection.outcome], ['IP address', 'ip', connection.ip], ['BattlEye GUID', 'battlEyeGuid', connection.battlEyeGuid], ['Steam UID', 'steamUid', connection.steamUid], ['Network ID', 'networkId', connection.networkId], ['Confidence', 'confidence', connection.confidence]].forEach(([label, key, value]) => {
     const field = document.createElement('div');
     field.className = 'player-detail-field';
     const caption = document.createElement('span'); caption.textContent = label;
-    const strong = document.createElement('strong'); strong.textContent = value || 'Unavailable';
+    const strong = document.createElement('strong'); strong.textContent = trackingFieldValue(key, value, playerTrackingAvailableFields);
     field.append(caption, strong); grid.appendChild(field);
   });
   body.appendChild(grid);

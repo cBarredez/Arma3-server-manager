@@ -25,6 +25,12 @@ export function connectionIdentity(connection) {
   return connection?.steamUid || connection?.battlEyeGuid || connection?.networkId || '—';
 }
 
+export function trackingFieldValue(key, value, availableFields = []) {
+  if (value !== null && value !== undefined && value !== '') return String(value);
+  const available = availableFields instanceof Set ? availableFields : new Set(availableFields);
+  return (key === 'ip' || key === 'battlEyeGuid') && !available.has(key) ? 'Requires BattlEye' : 'Not observed';
+}
+
 export function buildPlayerQuery({ runId, outcome, reasonCode, search, cursor, limit = 50 }) {
   const query = new URLSearchParams({ runId: runId || '', limit: String(limit) });
   if (outcome) query.set('outcome', outcome);
