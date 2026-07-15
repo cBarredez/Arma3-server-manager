@@ -72,7 +72,7 @@ public sealed record AppConfig(
             Int(values, "server.rcon_port", 2306),
             Text(values, "server.rcon_password", ""),
             Int(values, "server.max_players", 40),
-            Text(values, "server.memory_limit", "14g"),
+            Text(values, "server.memory_limit", "25g"),
             Text(values, "server.network_mode", "bridge"),
             Text(values, "web.base_url", ""),
             Text(values, "web.public_join_host", ""),

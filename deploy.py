@@ -221,7 +221,7 @@ def api_command(target: Target, image: str, remote_dir: str) -> list[str]:
     web = config.get("web", {})
     server = config.get("server", {})
     network_mode = server.get("network_mode", "bridge")
-    command = ["podman", "run", "-d", "--replace", "--name", "arma3-api", "--restart", "unless-stopped", "--memory", str(server.get("memory_limit", "14g")), "--health-cmd", f"curl -f http://127.0.0.1:{web.get('port', 8080)}/api/health", "--health-interval", "30s", "--health-retries", "3"]
+    command = ["podman", "run", "-d", "--replace", "--name", "arma3-api", "--restart", "unless-stopped", "--memory", str(server.get("memory_limit", "25g")), "--health-cmd", f"curl -f http://127.0.0.1:{web.get('port', 8080)}/api/health", "--health-interval", "30s", "--health-retries", "3"]
     if network_mode == "host":
         command += ["--network", "host"]
     else:

@@ -17,7 +17,7 @@ battleye_port = 2304
 von_port = 2305
 rcon_port = 2306
 max_players = 40
-memory_limit = "14g"
+memory_limit = "25g"
 network_mode = "host"
 
 [steam]
