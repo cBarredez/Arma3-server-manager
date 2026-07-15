@@ -7,6 +7,8 @@ import {
   LogConnectionGate,
   advanceLogCursor,
   countMissingLogEntries,
+  headlessClientLabel,
+  headlessClientSummary,
   isNearLogBottom,
   shouldStreamLogs,
   virtualLogRange,
@@ -38,6 +40,17 @@ test('gap count reports only entries that expired before the oldest available ID
   assert.equal(countMissingLogEntries({ requestedId: 10, oldestAvailableId: 15 }), 4);
   assert.equal(countMissingLogEntries({ requestedId: 14, oldestAvailableId: 15 }), 0);
   assert.equal(countMissingLogEntries({ requestedId: 0, oldestAvailableId: 15 }), 0);
+});
+
+test('headless sources receive stable labels and process counts are bounded', () => {
+  assert.equal(headlessClientLabel('headless-client-1'), 'HC1');
+  assert.equal(headlessClientLabel('HEADLESS-CLIENT-5'), 'HC5');
+  assert.equal(headlessClientLabel('arma'), null);
+  assert.deepEqual(headlessClientSummary(7, [101, 102, 102, 0]), {
+    desired: 5,
+    active: 2,
+    text: 'HC processes active: 2/5',
+  });
 });
 
 test('bottom proximity preserves a reader who has scrolled up', () => {
@@ -89,6 +102,14 @@ test('logs markup exposes accessible tabs and a virtual viewport', async () => {
   assert.equal((html.match(/role="tabpanel"/g) || []).length, 3);
   assert.match(html, /id="log-virtual-spacer"/);
   assert.match(html, /aria-live="off"/);
+});
+
+test('headless setting explains mission readiness and exposes live process status', async () => {
+  const html = await readFile(new URL('../src/pages/index.astro', import.meta.url), 'utf8');
+  assert.match(html, /Headless Clients/);
+  assert.match(html, /Requires a prepared mission/);
+  assert.match(html, /id="startup-headless-warning"/);
+  assert.match(html, /id="startup-headless-status"[^>]*aria-live="polite"/);
 });
 
 test('application stylesheet is emitted through the hashed Astro asset pipeline', async () => {
