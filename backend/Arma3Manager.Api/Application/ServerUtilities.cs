@@ -242,7 +242,8 @@ public sealed record ServerCfgInstrumentationResult(bool Complete, string[] Inst
 /// <summary>Adds versioned diagnostic hooks without changing the behavior of existing server-side handlers.</summary>
 public static class ServerCfgInstrumentation
 {
-    public const string Marker = "A3MGR_PLAYER_V1";
+    public const string Marker = "A3MGR_PLAYER_V2";
+    public const string LegacyMarker = "A3MGR_PLAYER_V1";
     static readonly (string Name, string Event)[] Handlers =
     [
         ("onUserConnected", "CONNECTED"),
@@ -274,7 +275,13 @@ public static class ServerCfgInstrumentation
                 continue;
             }
 
-            var hook = $"diag_log format [\"\"{Marker}|{eventName}|%1\"\",_this];";
+            // server.cfg handlers run in Arma's restricted administration VM. `format` is not available
+            // there, while diag_log, str, + and getUserInfo are. Keep CONNECTED self-contained so the
+            // event can include Steam UID/name even when BattlEye RCon is unavailable.
+            var hook = eventName == "CONNECTED"
+                ? $"diag_log (\"\"{Marker}|{eventName}|\"\" + str (_this + [getUserInfo (_this select 0)]));"
+                : $"diag_log (\"\"{Marker}|{eventName}|\"\" + str _this);";
+            var legacyHook = $"diag_log format [\"\"{LegacyMarker}|{eventName}|%1\"\",_this];";
             if (matches.Count == 0)
             {
                 text = text.TrimEnd() + $"\n{name} = \"{hook}\";\n";
@@ -283,12 +290,11 @@ public static class ServerCfgInstrumentation
             }
 
             var match = matches[0];
-            var body = match.Groups["body"].Value;
-            if (body.Contains($"{Marker}|{eventName}|", StringComparison.Ordinal))
-            {
-                instrumented.Add(name);
-                continue;
-            }
+            // Normalize our managed fragment on every run. This upgrades the broken V1 hook without
+            // touching the user's original handler body and remains byte-for-byte idempotent afterward.
+            var body = match.Groups["body"].Value
+                .Replace(legacyHook, "", StringComparison.Ordinal)
+                .Replace(hook, "", StringComparison.Ordinal);
             var replacement = $"{match.Groups["indent"].Value}{name} = \"{hook}{body}\";";
             text = text[..match.Index] + replacement + text[(match.Index + match.Length)..];
             instrumented.Add(name);

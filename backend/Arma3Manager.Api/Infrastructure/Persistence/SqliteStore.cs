@@ -79,6 +79,35 @@ public sealed class SqliteStore(string dbPath)
         command.Parameters.Clear();
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         await command.ExecuteNonQueryAsync();
+        await ApplyPlayerTrackingV2MigrationAsync(connection);
+    }
+
+    static async Task ApplyPlayerTrackingV2MigrationAsync(SqliteConnection connection)
+    {
+        var applied = connection.CreateCommand();
+        applied.CommandText = "select 1 from schema_migrations where version=2 limit 1";
+        if (await applied.ExecuteScalarAsync() is not null) return;
+
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+        var cleanup = connection.CreateCommand();
+        cleanup.Transaction = transaction;
+        cleanup.CommandText = """
+        update player_connections set network_id=null
+        where id in (
+            select distinct connection_id from player_events
+            where connection_id is not null and raw_text like '%Error in expression%'
+              and raw_text like '%A3MGR_PLAYER_V%'
+        ) and (instr(coalesce(network_id,''),'%1') > 0 or instr(coalesce(network_id,''),'_this') > 0
+               or instr(coalesce(network_id,''),'];>') > 0);
+        delete from player_events
+        where raw_text like '%Error in expression%' and raw_text like '%A3MGR_PLAYER_V%';
+        delete from player_connections
+        where not exists (select 1 from player_events e where e.connection_id=player_connections.id);
+        insert into schema_migrations(version,applied_at) values(2,$now);
+        """;
+        cleanup.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        await cleanup.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
     }
 
     // Records one CPU/RAM sample for the currently running game session (identified by RuntimeState.RunId),
@@ -348,8 +377,8 @@ public sealed class SqliteStore(string dbPath)
         if (await reader.ReadAsync()) return ReadPlayerConnection(reader);
         await reader.DisposeAsync();
 
-        // The early server hook only knows Arma's network id. Enrich it from RCon only when exactly one
-        // anonymous connection is waiting in the correlation window; ambiguity creates a separate record.
+        // The server hook can know Arma's network id, Steam UID, and name before RCon knows the IP/GUID.
+        // Enrich only when one compatible partial connection is waiting; ambiguity creates a separate row.
         if (signal.Kind != "rcon_seen") return null;
         var fallback = connection.CreateCommand();
         fallback.Transaction = transaction;
@@ -357,11 +386,12 @@ public sealed class SqliteStore(string dbPath)
         select id,run_id,first_seen_at,admitted_at,ended_at,outcome,active,network_id,steam_uid,battleye_guid,
                rcon_player_id,name,ip,reason_code,reason_text,source,confidence
         from player_connections where run_id=$run and active=1 and first_seen_at >= $cutoff
-          and battleye_guid is null and steam_uid is null and name is null and ip is null
+          and battleye_guid is null and ip is null and (name is null or name=$name)
         order by first_seen_at desc,id desc limit 2
         """;
         fallback.Parameters.AddWithValue("$run", signal.RunId);
         fallback.Parameters.AddWithValue("$cutoff", signal.OccurredAt.AddSeconds(-30).ToString("O"));
+        fallback.Parameters.AddWithValue("$name", (object?)signal.Name ?? DBNull.Value);
         var candidates = new List<PlayerConnectionRecord>();
         await using var fallbackReader = await fallback.ExecuteReaderAsync();
         while (await fallbackReader.ReadAsync()) candidates.Add(ReadPlayerConnection(fallbackReader));

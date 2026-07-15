@@ -27,6 +27,7 @@ public sealed class PlayerActivityService : BackgroundService
     readonly object stateGate = new();
     readonly HashSet<string> sources = new(StringComparer.OrdinalIgnoreCase) { "server_hooks", "rpt" };
     bool instrumentationComplete;
+    string? hookError;
     DateTimeOffset? lastEventAt;
     string? lastError;
     long dropped;
@@ -52,7 +53,7 @@ public sealed class PlayerActivityService : BackgroundService
             lock (stateGate)
             {
                 var full = instrumentationComplete && rcon.IsConfigured && rcon.IsConnected && dropped == 0;
-                return new(full ? "full" : "partial", sources.Order().ToArray(), lastEventAt, lastError, dropped);
+                return new(full ? "full" : "partial", sources.Order().ToArray(), lastEventAt, hookError ?? lastError, dropped);
             }
         }
     }
@@ -62,8 +63,7 @@ public sealed class PlayerActivityService : BackgroundService
         lock (stateGate)
         {
             instrumentationComplete = result.Complete;
-            if (!result.Complete) lastError = result.Errors.Length == 0 ? "Server hooks are incomplete" : string.Join("; ", result.Errors);
-            else if (lastError?.StartsWith("Server hooks", StringComparison.Ordinal) == true) lastError = null;
+            hookError = result.Complete ? null : result.Errors.Length == 0 ? "Server hooks are incomplete" : string.Join("; ", result.Errors);
         }
     }
 
@@ -219,6 +219,18 @@ public sealed class PlayerActivityService : BackgroundService
 
     void OnLogEntry(LogEntry entry)
     {
+        if (entry.Data.Contains("Error in expression", StringComparison.OrdinalIgnoreCase) &&
+            (entry.Data.Contains(ServerCfgInstrumentation.Marker, StringComparison.Ordinal) ||
+             entry.Data.Contains(ServerCfgInstrumentation.LegacyMarker, StringComparison.Ordinal)))
+        {
+            lock (stateGate)
+            {
+                instrumentationComplete = false;
+                hookError = "Server hooks failed at runtime; inspect the ARMA expression error in Server Logs";
+            }
+            logger.LogError("ARMA rejected a player tracking hook: {HookError}", entry.Data);
+            return;
+        }
         if (entry.RunId is null || !PlayerSignalParser.IsCandidate(entry.Data)) return;
         Enqueue(entry);
     }
@@ -266,11 +278,12 @@ public sealed class PlayerActivityService : BackgroundService
 
 public static class PlayerSignalParser
 {
-    static readonly Regex Marker = new(@"A3MGR_PLAYER_V1\|(?<event>[A-Z_]+)\|(?<payload>.*)$", RegexOptions.Compiled);
+    static readonly Regex Marker = new(@"^A3MGR_PLAYER_V(?<version>[12])\|(?<event>[A-Z_]+)\|(?<payload>\[.*\])$", RegexOptions.Compiled);
+    static readonly Regex LogTimestamp = new(@"^\s*(?:(?:\d{4}/\d{1,2}/\d{1,2},\s*)?(?:\d{1,2}:){2}\d{2})\s+", RegexOptions.Compiled);
     static readonly Regex RconConnected = new(@"Player\s+#?(?<id>\d+)?\s*(?<name>.*?)\s*\((?<guid>[0-9a-f]{16,})\).*?connected", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     static readonly Regex RconKicked = new(@"Player\s+#?(?<id>\d+)?\s*(?<name>.*?)\s*\((?<guid>[0-9a-f]{16,})\).*?(?:kicked|banned)(?:.*?:\s*(?<reason>.*))?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     static readonly Regex NaturalConnection = new(@"\bPlayer\s+(?<name>[^\r\n]+?)\s+(?<event>connected|disconnected)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    static readonly string[] CandidateTerms = ["A3MGR_PLAYER_V1", "player", "battleye", "steam check", "signature", "unsigned", "missing addon", "wrong password", "session locked", "kicked", "banned", "disconnected"];
+    static readonly string[] CandidateTerms = ["A3MGR_PLAYER_V", "player", "battleye", "steam check", "signature", "unsigned", "missing addon", "wrong password", "session locked", "kicked", "banned", "disconnected"];
 
     public static bool IsCandidate(string text) => CandidateTerms.Any(term => text.Contains(term, StringComparison.OrdinalIgnoreCase));
 
@@ -278,10 +291,11 @@ public static class PlayerSignalParser
     {
         signal = null;
         if (entry.RunId is null) return false;
-        var marker = Marker.Match(entry.Data);
+        var structured = NormalizeStructuredRecord(entry.Data);
+        var marker = Marker.Match(structured);
         if (marker.Success)
         {
-            signal = ParseMarker(entry, marker.Groups["event"].Value, marker.Groups["payload"].Value);
+            signal = ParseMarker(entry, marker.Groups["version"].Value, marker.Groups["event"].Value, marker.Groups["payload"].Value);
             return signal is not null;
         }
 
@@ -309,13 +323,35 @@ public static class PlayerSignalParser
             signal = Build(entry, kind, name: natural.Groups["name"].Value.Trim(), admitted: kind == "connected", terminal: kind == "disconnected", confidence: "inferred");
             return true;
         }
+        var reasonCode = ClassifyStandaloneRejection(entry.Data);
+        if (reasonCode is not null)
+        {
+            signal = Build(entry, "rejected", reasonCode: reasonCode, reasonText: RejectionText(entry.Data),
+                terminal: true, confidence: "inferred");
+            return true;
+        }
         return false;
     }
 
-    static PlayerSignal? ParseMarker(LogEntry entry, string eventName, string payload)
+    static string NormalizeStructuredRecord(string raw)
+    {
+        var text = raw.Trim();
+        while (true)
+        {
+            var timestamp = LogTimestamp.Match(text);
+            if (!timestamp.Success) break;
+            text = text[timestamp.Length..].TrimStart();
+        }
+        if (text.Length >= 2 && text[0] == '"' && text[^1] == '"') text = text[1..^1].Trim();
+        return text;
+    }
+
+    static PlayerSignal? ParseMarker(LogEntry entry, string version, string eventName, string payload)
     {
         var values = ParseValues(payload);
+        if (values is null || !ExpectedShape(version, eventName, values.Count)) return null;
         var networkId = values.ElementAtOrDefault(0);
+        if (!IsNetworkId(networkId)) return null;
         var kind = eventName switch
         {
             "CONNECTED" => "connected",
@@ -327,6 +363,20 @@ public static class PlayerSignalParser
             "DIFFERENT_DATA" => "different_data",
             _ => "unknown"
         };
+        if (kind == "unknown") return null;
+        string? steamUid = null;
+        string? name = null;
+        if (eventName == "CONNECTED" && values.Count == 2)
+        {
+            var userInfo = ParseValues(values[1]);
+            if (userInfo is null || (userInfo.Count != 0 && userInfo.Count < 8)) return null;
+            if (userInfo.Count >= 8)
+            {
+                steamUid = EmptyToNull(userInfo[2]);
+                name = EmptyToNull(userInfo[3]);
+                if (ParseBool(userInfo[7]) || steamUid?.StartsWith("HC", StringComparison.OrdinalIgnoreCase) == true) return null;
+            }
+        }
         var typeNumber = eventName == "KICKED" ? ParseInt(values.ElementAtOrDefault(1)) : null;
         var reason = eventName == "KICKED" ? values.ElementAtOrDefault(2) : values.ElementAtOrDefault(1);
         var reasonCode = eventName switch
@@ -338,18 +388,21 @@ public static class PlayerSignalParser
             "KICKED" => KickReason(typeNumber, reason),
             _ => null
         };
-        return Build(entry, kind, networkId: networkId, reasonCode: reasonCode, reasonText: reason,
-            admitted: eventName == "CONNECTED", terminal: eventName is "DISCONNECTED" or "KICKED", confidence: "authoritative");
+        // server.cfg documents a kick type ID but not its numeric mapping. The mapping currently follows
+        // the richer mission OnUserKicked event and stays inferred until a real server fixture confirms it.
+        var confidence = eventName == "KICKED" ? "inferred" : "authoritative";
+        return Build(entry, kind, networkId: networkId, steamUid: steamUid, name: name, reasonCode: reasonCode, reasonText: reason,
+            admitted: eventName == "CONNECTED", terminal: eventName is "DISCONNECTED" or "KICKED", confidence: confidence);
     }
 
-    static PlayerSignal Build(LogEntry entry, string kind, string? networkId = null, string? guid = null, int? rconId = null,
+    static PlayerSignal Build(LogEntry entry, string kind, string? networkId = null, string? steamUid = null, string? guid = null, int? rconId = null,
         string? name = null, string? ip = null, string? reasonCode = null, string? reasonText = null,
         bool admitted = false, bool terminal = false, string confidence = "unknown")
     {
         var at = entry.Ts;
         return new(entry.RunId!, at, kind, entry.Source, confidence, entry.Data,
             Fingerprint(entry.RunId!, kind, guid ?? networkId, ip, reasonText, entry.Data, at),
-            NetworkId: networkId, BattlEyeGuid: guid, RconPlayerId: rconId, Name: name, Ip: ip,
+            NetworkId: networkId, SteamUid: steamUid, BattlEyeGuid: guid, RconPlayerId: rconId, Name: name, Ip: ip,
             ReasonCode: reasonCode, ReasonText: reasonText, Admitted: admitted, Terminal: terminal);
     }
 
@@ -357,6 +410,7 @@ public static class PlayerSignalParser
     {
         var normalized = Regex.Replace(raw.Trim(), @"^(?:\d{1,2}:\d{2}:\d{2}\s*)+", "");
         var marker = normalized.IndexOf(ServerCfgInstrumentation.Marker, StringComparison.Ordinal);
+        if (marker < 0) marker = normalized.IndexOf(ServerCfgInstrumentation.LegacyMarker, StringComparison.Ordinal);
         if (marker >= 0) normalized = normalized[marker..];
         normalized = normalized.Trim().Trim('"').ToLowerInvariant();
         var bucket = at.ToUnixTimeSeconds() / 5;
@@ -384,12 +438,40 @@ public static class PlayerSignalParser
         return "unknown";
     }
 
-    static List<string> ParseValues(string payload)
+    static bool ExpectedShape(string version, string eventName, int count) => eventName switch
     {
-        var text = payload.Trim().Trim('"').Trim().Trim('[', ']');
+        "CONNECTED" => count == 1 || (version == "2" && count == 2),
+        "DISCONNECTED" or "DUPLICATE_ID" => count == 1,
+        "UNSIGNED_DATA" or "HACKED_DATA" or "DIFFERENT_DATA" => count == 2,
+        "KICKED" => count == 3,
+        _ => false
+    };
+
+    static bool IsNetworkId(string? value) => !string.IsNullOrWhiteSpace(value) && value.All(char.IsAsciiDigit);
+
+    static string? ClassifyStandaloneRejection(string text)
+    {
+        if (text.Contains("wrong password", StringComparison.OrdinalIgnoreCase)) return "wrong_password";
+        if (text.Contains("session locked", StringComparison.OrdinalIgnoreCase)) return "session_locked";
+        if (text.Contains("steam check", StringComparison.OrdinalIgnoreCase)) return "steam_check";
+        return null;
+    }
+
+    static string RejectionText(string text)
+    {
+        var normalized = Regex.Replace(text.Trim(), @"^(?:(?:\d{1,2}:){2}\d{2}\s*)+", "");
+        return normalized.Length <= 2_048 ? normalized : normalized[..2_048];
+    }
+
+    static List<string>? ParseValues(string payload)
+    {
+        var trimmed = payload.Trim();
+        if (trimmed.Length < 2 || trimmed[0] != '[' || trimmed[^1] != ']') return null;
+        var text = trimmed[1..^1];
         var values = new List<string>();
         var current = new StringBuilder();
         var quoted = false;
+        var depth = 0;
         for (var index = 0; index < text.Length; index++)
         {
             var character = text[index];
@@ -398,13 +480,29 @@ public static class PlayerSignalParser
                 if (quoted && index + 1 < text.Length && text[index + 1] == '"') { current.Append('"'); index++; }
                 else quoted = !quoted;
             }
-            else if (character == ',' && !quoted) { values.Add(current.ToString().Trim()); current.Clear(); }
+            else if (!quoted && character == '[') { depth++; current.Append(character); }
+            else if (!quoted && character == ']')
+            {
+                if (depth == 0) return null;
+                depth--;
+                current.Append(character);
+            }
+            else if (character == ',' && !quoted && depth == 0) { values.Add(CleanValue(current.ToString())); current.Clear(); }
             else current.Append(character);
         }
-        if (current.Length > 0 || text.EndsWith(',')) values.Add(current.ToString().Trim());
-        return values.Select(value => value.Trim().Trim('"')).ToList();
+        if (quoted || depth != 0) return null;
+        if (current.Length > 0 || text.EndsWith(',')) values.Add(CleanValue(current.ToString()));
+        return values;
+    }
+
+    static string CleanValue(string value)
+    {
+        var cleaned = value.Trim();
+        if (cleaned.Length >= 2 && cleaned[0] == '"' && cleaned[^1] == '"') cleaned = cleaned[1..^1];
+        return cleaned.Replace("\"\"", "\"", StringComparison.Ordinal);
     }
 
     static int? ParseInt(string? value) => int.TryParse(value, out var parsed) ? parsed : null;
+    static bool ParseBool(string? value) => bool.TryParse(value, out var parsed) && parsed;
     static string? EmptyToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
