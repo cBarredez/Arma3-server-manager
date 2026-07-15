@@ -270,6 +270,31 @@ public static class ApiEndpoints
             });
         });
         
+        // Backs "Añadir métricas solicitadas" (issue #12): per-match CPU/RAM history, listed here and
+        // downloadable as CSV. A "session" is one game-server run, identified by RuntimeState.RunId; the
+        // MetricsSampler background service records a sample every 5s into metrics_samples while it's running.
+        api.MapGet("/metrics/sessions", async (RuntimeState runtime) =>
+            Results.Json(await store.GetMetricsSessionsAsync(runtime.IsRunning ? runtime.RunId : null)));
+
+        api.MapGet("/metrics/sessions/{runId}/csv", async (string runId) =>
+        {
+            var samples = await store.GetMetricsSamplesAsync(runId);
+            if (samples.Count == 0) return Results.Json(new { error = "No metrics recorded for that session" }, statusCode: 404);
+
+            var csv = new StringBuilder();
+            csv.AppendLine("timestamp_utc,cpu_percent,cores_capacity,memory_used_mb,memory_percent");
+            foreach (var sample in samples)
+            {
+                csv.Append(sample.SampledAt.UtcDateTime.ToString("O")).Append(',')
+                    .Append(sample.CpuPercent?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "").Append(',')
+                    .Append(sample.CoresCapacity.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(',')
+                    .Append((sample.MemoryUsedBytes / 1024d / 1024d).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(',')
+                    .Append(sample.MemoryPercent.ToString(System.Globalization.CultureInfo.InvariantCulture)).AppendLine();
+            }
+            var bytes = Encoding.UTF8.GetBytes(csv.ToString());
+            return Results.File(bytes, "text/csv", $"session-{runId}.csv");
+        });
+
         api.MapGet("/mods", async () => Results.Json(await store.SyncAndGetModsAsync(cfg.Arma3Dir)));
         api.MapPut("/mods/{id}", async (string id, ModUpdate req) =>
         {

@@ -27,7 +27,91 @@ public sealed class SqliteStore(string dbPath)
         create table if not exists task_history (id integer primary key autoincrement, kind text not null, command text not null, exit_code integer null, created_at text not null);
         create table if not exists file_index (path text primary key, parent text not null, name text not null, is_dir integer not null, size integer not null, created_utc text not null, mtime_utc text not null, scan_gen integer not null);
         create index if not exists ix_file_index_parent on file_index(parent);
+        create table if not exists metrics_samples (id integer primary key autoincrement, run_id text not null, sampled_at text not null, cpu_percent real null, cores_capacity real not null, memory_used_bytes integer not null, memory_percent real not null);
+        create index if not exists ix_metrics_samples_run on metrics_samples(run_id, sampled_at);
         """;
+        await command.ExecuteNonQueryAsync();
+    }
+
+    // Records one CPU/RAM sample for the currently running game session (identified by RuntimeState.RunId),
+    // so "how much CPU/RAM did this match use" can be reconstructed and exported after the fact instead of
+    // only being visible live on the dashboard while the match is running.
+    public async Task InsertMetricsSampleAsync(MetricsSample sample)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "insert into metrics_samples(run_id, sampled_at, cpu_percent, cores_capacity, memory_used_bytes, memory_percent) values ($runId,$sampledAt,$cpu,$cores,$memBytes,$memPercent)";
+        command.Parameters.AddWithValue("$runId", sample.RunId);
+        command.Parameters.AddWithValue("$sampledAt", sample.SampledAt.ToString("O"));
+        command.Parameters.AddWithValue("$cpu", (object?)sample.CpuPercent ?? DBNull.Value);
+        command.Parameters.AddWithValue("$cores", sample.CoresCapacity);
+        command.Parameters.AddWithValue("$memBytes", sample.MemoryUsedBytes);
+        command.Parameters.AddWithValue("$memPercent", sample.MemoryPercent);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<List<MetricsSessionSummary>> GetMetricsSessionsAsync(string? currentRunId, int limit = 50)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        select run_id, min(sampled_at), max(sampled_at), count(*), avg(cpu_percent), max(cpu_percent), max(cores_capacity), avg(memory_percent), max(memory_percent)
+        from metrics_samples
+        group by run_id
+        order by min(sampled_at) desc
+        limit $limit
+        """;
+        command.Parameters.AddWithValue("$limit", limit);
+        await using var reader = await command.ExecuteReaderAsync();
+        var results = new List<MetricsSessionSummary>();
+        while (await reader.ReadAsync())
+        {
+            var runId = reader.GetString(0);
+            var startedAt = DateTimeOffset.Parse(reader.GetString(1));
+            var lastSampleAt = DateTimeOffset.Parse(reader.GetString(2));
+            var ongoing = runId == currentRunId;
+            results.Add(new(
+                runId, startedAt, ongoing ? null : lastSampleAt, reader.GetInt32(3),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                reader.IsDBNull(5) ? null : reader.GetDouble(5),
+                reader.GetDouble(6),
+                reader.IsDBNull(7) ? null : reader.GetDouble(7),
+                reader.IsDBNull(8) ? null : reader.GetDouble(8)));
+        }
+        return results;
+    }
+
+    public async Task<List<MetricsSample>> GetMetricsSamplesAsync(string runId)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "select run_id, sampled_at, cpu_percent, cores_capacity, memory_used_bytes, memory_percent from metrics_samples where run_id = $runId order by sampled_at";
+        command.Parameters.AddWithValue("$runId", runId);
+        await using var reader = await command.ExecuteReaderAsync();
+        var results = new List<MetricsSample>();
+        while (await reader.ReadAsync())
+        {
+            results.Add(new(
+                reader.GetString(0), DateTimeOffset.Parse(reader.GetString(1)),
+                reader.IsDBNull(2) ? null : reader.GetDouble(2),
+                reader.GetDouble(3), reader.GetInt64(4), reader.GetDouble(5)));
+        }
+        return results;
+    }
+
+    // Keeps the table from growing forever on a long-lived server — only the most recent sessions are kept
+    // for CSV export; older ones are dropped wholesale (never partially truncated, so a kept session's history
+    // stays complete).
+    public async Task PruneMetricsSessionsAsync(int keepSessions = 30)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        delete from metrics_samples where run_id not in (
+            select run_id from metrics_samples group by run_id order by min(sampled_at) desc limit $keep
+        )
+        """;
+        command.Parameters.AddWithValue("$keep", keepSessions);
         await command.ExecuteNonQueryAsync();
     }
     public async Task<bool> EnsureFileIndexVersionAsync(int version)

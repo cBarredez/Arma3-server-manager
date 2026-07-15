@@ -34,6 +34,8 @@ public sealed record SteamInputRequest(string Input);
 public sealed record AccountUpdateRequest(string Username, string CurrentPassword, string NewPassword);
 public sealed record FactoryResetRequest(string CurrentPassword, string Confirmation);
 public sealed record RestartAppRequest(string CurrentPassword);
+public sealed record MetricsSample(string RunId, DateTimeOffset SampledAt, double? CpuPercent, double CoresCapacity, long MemoryUsedBytes, double MemoryPercent);
+public sealed record MetricsSessionSummary(string RunId, DateTimeOffset StartedAt, DateTimeOffset? EndedAt, int SampleCount, double? AvgCpuPercent, double? PeakCpuPercent, double CoresCapacity, double? AvgMemoryPercent, double? PeakMemoryPercent);
 public sealed record PanelAuth(string Username, string PasswordSalt, string PasswordHash);
 public sealed record RconPlayer(int Id, string Guid, string Name, string Ip, int Ping, bool Lobby, bool Verified);
 public sealed record RconCommandRequest(string Command);
