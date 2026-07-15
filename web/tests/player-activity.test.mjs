@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPlayerQuery, connectionIdentity, friendlyReason } from '../src/scripts/player-activity.js';
+import { buildPlayerQuery, connectionIdentity, friendlyReason, trackingFieldValue } from '../src/scripts/player-activity.js';
 
 test('player query carries session filters and safely encodes search text', () => {
   const query = buildPlayerQuery({ runId: 'run-1', outcome: 'rejected', reasonCode: 'missing_addon', search: 'Alpha & <script>', cursor: '50' });
@@ -22,4 +22,12 @@ test('reason labels retain unknown future reason codes', () => {
   assert.equal(friendlyReason('steam_check'), 'Steam verification');
   assert.equal(friendlyReason('future_reason'), 'future reason');
   assert.equal(friendlyReason(null), 'No rejection reason');
+});
+
+test('tracking detail distinguishes disabled BattlEye from missing observations', () => {
+  assert.equal(trackingFieldValue('ip', null, ['name', 'steamUid']), 'Requires BattlEye');
+  assert.equal(trackingFieldValue('battlEyeGuid', null, new Set(['name', 'steamUid'])), 'Requires BattlEye');
+  assert.equal(trackingFieldValue('ip', null, ['ip', 'battlEyeGuid']), 'Not observed');
+  assert.equal(trackingFieldValue('steamUid', null, ['steamUid']), 'Not observed');
+  assert.equal(trackingFieldValue('ip', '203.0.113.7', []), '203.0.113.7');
 });
