@@ -80,6 +80,7 @@ public sealed class SqliteStore(string dbPath)
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         await command.ExecuteNonQueryAsync();
         await ApplyPlayerTrackingV2MigrationAsync(connection);
+        await ApplyHeadlessClientHistoryMigrationAsync(connection);
     }
 
     static async Task ApplyPlayerTrackingV2MigrationAsync(SqliteConnection connection)
@@ -104,6 +105,34 @@ public sealed class SqliteStore(string dbPath)
         delete from player_connections
         where not exists (select 1 from player_events e where e.connection_id=player_connections.id);
         insert into schema_migrations(version,applied_at) values(2,$now);
+        """;
+        cleanup.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        await cleanup.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
+    static async Task ApplyHeadlessClientHistoryMigrationAsync(SqliteConnection connection)
+    {
+        var applied = connection.CreateCommand();
+        applied.CommandText = "select 1 from schema_migrations where version=3 limit 1";
+        if (await applied.ExecuteScalarAsync() is not null) return;
+
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+        var cleanup = connection.CreateCommand();
+        cleanup.Transaction = transaction;
+        cleanup.CommandText = """
+        delete from player_events
+        where id in (
+            select e.id from player_events e
+            join player_connections p on p.id=e.connection_id
+            where e.kind='rejected' and e.reason_code='wrong_password' and e.source='arma'
+              and lower(e.raw_text) like '%cannot join the session. wrong password was given.%'
+              and p.network_id is null and p.steam_uid is null and p.battleye_guid is null
+              and p.rcon_player_id is null and p.name is null and p.ip is null
+        );
+        delete from player_connections
+        where not exists (select 1 from player_events e where e.connection_id=player_connections.id);
+        insert into schema_migrations(version,applied_at) values(3,$now);
         """;
         cleanup.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         await cleanup.ExecuteNonQueryAsync();

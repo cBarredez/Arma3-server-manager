@@ -317,7 +317,7 @@ public sealed class RuntimeState(LogHub logHub)
     // the panel reports the server as stopped.
     public void StartHeadlessClient(string file, IEnumerable<string> arguments, string workingDirectory, int index)
     {
-        var hc = StartProcess(file, arguments, workingDirectory, source: "arma", runId: runId);
+        var hc = StartProcess(file, arguments, workingDirectory, source: $"headless-client-{index}", runId: runId);
         lock (headlessClients) headlessClients.Add(hc);
         Push("system", $"Started headless client {index} PID {hc.Id}", "manager", runId);
         hc.Exited += (_, _) =>

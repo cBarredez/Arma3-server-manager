@@ -219,6 +219,7 @@ public sealed class PlayerActivityService : BackgroundService
 
     void OnLogEntry(LogEntry entry)
     {
+        if (PlayerSignalParser.IsHeadlessClientSource(entry.Source)) return;
         if (entry.Data.Contains("Error in expression", StringComparison.OrdinalIgnoreCase) &&
             (entry.Data.Contains(ServerCfgInstrumentation.Marker, StringComparison.Ordinal) ||
              entry.Data.Contains(ServerCfgInstrumentation.LegacyMarker, StringComparison.Ordinal)))
@@ -286,11 +287,12 @@ public static class PlayerSignalParser
     static readonly string[] CandidateTerms = ["A3MGR_PLAYER_V", "player", "battleye", "steam check", "signature", "unsigned", "missing addon", "wrong password", "session locked", "kicked", "banned", "disconnected"];
 
     public static bool IsCandidate(string text) => CandidateTerms.Any(term => text.Contains(term, StringComparison.OrdinalIgnoreCase));
+    public static bool IsHeadlessClientSource(string? source) => source?.StartsWith("headless-client-", StringComparison.OrdinalIgnoreCase) == true;
 
     public static bool TryParse(LogEntry entry, out PlayerSignal? signal)
     {
         signal = null;
-        if (entry.RunId is null) return false;
+        if (entry.RunId is null || IsHeadlessClientSource(entry.Source)) return false;
         var structured = NormalizeStructuredRecord(entry.Data);
         var marker = Marker.Match(structured);
         if (marker.Success)
