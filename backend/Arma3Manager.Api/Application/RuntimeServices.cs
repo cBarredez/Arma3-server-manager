@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Text;
+using System.Threading.Channels;
 using Arma3Manager.Api.Contracts;
 using Arma3Manager.Api.Domain;
 using Arma3Manager.Api.Infrastructure;
@@ -16,19 +17,48 @@ public sealed record LogReadResult(
     long? OldestAvailableId,
     long? NewestAvailableId);
 
+public sealed class LogSubscription : IAsyncDisposable
+{
+    readonly Action<Guid> unsubscribe;
+    Guid id;
+
+    internal LogSubscription(Guid id, LogReadResult initial, long nextExpectedId, ChannelReader<LogEntry> reader, Action<Guid> unsubscribe)
+    {
+        this.id = id;
+        Initial = initial;
+        NextExpectedId = nextExpectedId;
+        Reader = reader;
+        this.unsubscribe = unsubscribe;
+    }
+
+    public LogReadResult Initial { get; }
+    public long NextExpectedId { get; }
+    public ChannelReader<LogEntry> Reader { get; }
+
+    public ValueTask DisposeAsync()
+    {
+        var current = id;
+        if (current == Guid.Empty) return ValueTask.CompletedTask;
+        id = Guid.Empty;
+        unsubscribe(current);
+        return ValueTask.CompletedTask;
+    }
+}
+
 /// <summary>Thread-safe bounded history and notification source for the live log stream.</summary>
 public sealed class LogHub
 {
     public const int DefaultCapacity = 5_000;
+    public const int DefaultSubscriptionCapacity = 1_024;
     public const int MaxLineBytes = 64 * 1024;
     const string TruncationSuffix = " … [truncated at 64 KiB]";
 
     readonly LogEntry?[] entries;
     readonly object gate = new();
+    readonly Dictionary<Guid, Channel<LogEntry>> subscribers = [];
     int start;
     int count;
     long nextLogId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
-    TaskCompletionSource<bool> logSignal = NewLogSignal();
     public event Action<LogEntry>? EntryPushed;
 
     public LogHub() : this(DefaultCapacity) { }
@@ -40,6 +70,7 @@ public sealed class LogHub
     }
 
     public int Capacity => entries.Length;
+    public int ActiveSubscriberCount { get { lock (gate) return subscribers.Count; } }
 
     public IReadOnlyList<LogEntry> Snapshot(int? limit = null)
     {
@@ -61,26 +92,34 @@ public sealed class LogHub
 
     public async Task<LogReadResult> WaitForAfterAsync(long id, TimeSpan timeout, CancellationToken ct)
     {
-        Task signal;
-        lock (gate)
-        {
-            var pending = ReadAfterLocked(id);
-            if (pending.Entries.Count > 0 || pending.HasGap) return pending;
-            signal = logSignal.Task;
-        }
-
-        try { await signal.WaitAsync(timeout, ct); }
+        await using var subscription = Subscribe(id);
+        if (subscription.Initial.Entries.Count > 0 || subscription.Initial.HasGap) return subscription.Initial;
+        try { await subscription.Reader.ReadAsync(ct).AsTask().WaitAsync(timeout, ct); }
         catch (TimeoutException) { }
-
-        lock (gate) return ReadAfterLocked(id);
+        return ReadAfter(id);
     }
 
-    static TaskCompletionSource<bool> NewLogSignal() =>
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public LogSubscription Subscribe(long afterId, int capacity = DefaultSubscriptionCapacity)
+    {
+        if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
+        lock (gate)
+        {
+            var id = Guid.NewGuid();
+            var channel = Channel.CreateBounded<LogEntry>(new BoundedChannelOptions(capacity)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.DropOldest,
+                AllowSynchronousContinuations = false
+            });
+            var initial = ReadAfterLocked(Math.Max(0, afterId));
+            subscribers.Add(id, channel);
+            return new LogSubscription(id, initial, nextLogId + 1, channel.Reader, Unsubscribe);
+        }
+    }
 
     public LogEntry Push(string type, string data, string source = "manager", string? runId = null)
     {
-        TaskCompletionSource<bool> signal;
         LogEntry entry;
         lock (gate)
         {
@@ -95,12 +134,20 @@ public sealed class LogHub
                 entries[start] = entry;
                 start = (start + 1) % entries.Length;
             }
-            signal = logSignal;
-            logSignal = NewLogSignal();
+            foreach (var subscriber in subscribers.Values) subscriber.Writer.TryWrite(entry);
         }
-        signal.TrySetResult(true);
         EntryPushed?.Invoke(entry);
         return entry;
+    }
+
+    void Unsubscribe(Guid id)
+    {
+        Channel<LogEntry>? channel;
+        lock (gate)
+        {
+            if (!subscribers.Remove(id, out channel)) return;
+        }
+        channel.Writer.TryComplete();
     }
 
     LogReadResult ReadAfterLocked(long id)
@@ -111,12 +158,10 @@ public sealed class LogHub
         var newest = entries[(start + count - 1) % entries.Length]!.Id;
         var hasGap = id > 0 && (id < oldest - 1 || id > newest);
         var effectiveId = hasGap ? oldest - 1 : id;
-        var pending = new List<LogEntry>(count);
-        for (var index = 0; index < count; index++)
-        {
-            var entry = entries[(start + index) % entries.Length]!;
-            if (entry.Id > effectiveId) pending.Add(entry);
-        }
+        var skip = effectiveId < oldest ? 0 : (int)Math.Min(effectiveId - oldest + 1, count);
+        var pending = new LogEntry[count - skip];
+        for (var index = 0; index < pending.Length; index++)
+            pending[index] = entries[(start + skip + index) % entries.Length]!;
         return new(pending, hasGap, id, oldest, newest);
     }
 
@@ -163,6 +208,8 @@ public sealed class RuntimeState(LogHub logHub)
         (await logHub.WaitForAfterAsync(id, timeout, ct)).Entries;
 
     public LogReadResult ReadLogsAfter(long id) => logHub.ReadAfter(id);
+    public LogSubscription SubscribeToLogs(long id, int capacity = LogHub.DefaultSubscriptionCapacity) =>
+        logHub.Subscribe(id, capacity);
     public Task<LogReadResult> WaitForLogReadAsync(long id, TimeSpan timeout, CancellationToken ct) =>
         logHub.WaitForAfterAsync(id, timeout, ct);
 

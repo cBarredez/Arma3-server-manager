@@ -499,7 +499,7 @@ public static class ApiEndpoints
         
         // Server-Sent Events — stable IDs support native Last-Event-ID reconnects while the
         // bounded LogHub reports an explicit gap if a client falls behind its retained history.
-        api.MapGet("/logs/stream", (HttpContext http, LogStreamService stream, CancellationToken ct, long since = 0) =>
+        api.MapGet("/logs/stream", (HttpContext http, LogStreamService stream, CancellationToken ct, long since = 0, string? batch = null) =>
         {
             http.Response.Headers.CacheControl = "no-cache";
             http.Response.Headers["X-Accel-Buffering"] = "no";
@@ -507,7 +507,8 @@ public static class ApiEndpoints
             var lastId = Math.Max(0, since);
             if (long.TryParse(http.Request.Headers["Last-Event-ID"], out var reconnectId))
                 lastId = Math.Max(lastId, reconnectId);
-            return TypedResults.ServerSentEvents(stream.Stream(lastId, ct));
+            var batched = batch == "1" || bool.TryParse(batch, out var enabled) && enabled;
+            return TypedResults.ServerSentEvents(stream.Stream(lastId, ct, batched));
         });
         
         api.MapGet("/paths", () => Results.Json(paths));

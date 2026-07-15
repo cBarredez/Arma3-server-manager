@@ -1,4 +1,5 @@
 using Arma3Manager.Api.Application;
+using Arma3Manager.Api.Contracts;
 using System.Text;
 using Xunit;
 
@@ -58,6 +59,49 @@ public sealed class RuntimeStateTests
 
         Assert.Equal(pushed.Id, Assert.Single((await first).Entries).Id);
         Assert.Equal(pushed.Id, Assert.Single((await second).Entries).Id);
+    }
+
+    [Fact]
+    public async Task SubscriptionAtomicallyReplaysThenReceivesLiveEntries()
+    {
+        var hub = new LogHub(10);
+        var replay = hub.Push("stdout", "replay", "arma", "run-1");
+        await using var subscription = hub.Subscribe(0);
+        var live = hub.Push("stdout", "live", "arma", "run-1");
+
+        Assert.Equal(replay.Id, Assert.Single(subscription.Initial.Entries).Id);
+        Assert.Equal(live.Id, (await subscription.Reader.ReadAsync()).Id);
+    }
+
+    [Fact]
+    public async Task TenSubscribersReceiveTheSameOrderedEntries()
+    {
+        var hub = new LogHub(20);
+        var subscriptions = Enumerable.Range(0, 10).Select(_ => hub.Subscribe(0)).ToArray();
+        var expected = Enumerable.Range(0, 5).Select(index => hub.Push("stdout", $"line-{index}")).Select(entry => entry.Id).ToArray();
+
+        foreach (var subscription in subscriptions)
+        {
+            var actual = new List<long>();
+            while (subscription.Reader.TryRead(out var entry)) actual.Add(entry.Id);
+            Assert.Equal(expected, actual);
+            await subscription.DisposeAsync();
+        }
+        Assert.Equal(0, hub.ActiveSubscriberCount);
+    }
+
+    [Fact]
+    public async Task SlowSubscriberDropsOnlyItsOldestNotificationsAndRingCanRecoverThem()
+    {
+        var hub = new LogHub(10);
+        await using var subscription = hub.Subscribe(0, capacity: 2);
+        var pushed = Enumerable.Range(1, 5).Select(index => hub.Push("stdout", $"line-{index}")).ToArray();
+        var queued = new List<LogEntry>();
+        while (subscription.Reader.TryRead(out var entry)) queued.Add(entry);
+
+        Assert.Equal(pushed[^2].Id, queued[0].Id);
+        Assert.Equal(pushed[^1].Id, queued[1].Id);
+        Assert.Equal(pushed.Select(entry => entry.Id), hub.ReadAfter(0).Entries.Select(entry => entry.Id));
     }
 
     [Fact]
