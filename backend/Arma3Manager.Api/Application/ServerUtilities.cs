@@ -234,12 +234,21 @@ public static class ServerCfgWriter
         var text = await File.ReadAllTextAsync(settings.ServerCfg);
         if (settings.MaxPlayers is not null) text = Regex.Replace(text, @"maxPlayers\s*=\s*\d+\s*;", $"maxPlayers = {settings.MaxPlayers};");
         if (settings.ServerPassword is not null) text = Regex.Replace(text, @"password\s*=\s*""[^""]*""\s*;", $"password = \"{settings.ServerPassword}\";");
+        text = EnsureIntegerValue(text, "BattlEye", settings.DisableBattleEye ? 0 : 1);
         if (settings.HeadlessClients > 0)
         {
             text = EnsureArrayValue(text, "headlessClients", "127.0.0.1");
             text = EnsureArrayValue(text, "localClient", "127.0.0.1");
         }
         await File.WriteAllTextAsync(settings.ServerCfg, text);
+    }
+
+    static string EnsureIntegerValue(string text, string setting, int value)
+    {
+        var pattern = $@"(?im)^\s*{Regex.Escape(setting)}\s*=\s*\d+\s*;";
+        if (Regex.IsMatch(text, pattern)) return Regex.Replace(text, pattern, $"{setting} = {value};");
+        var separator = text.Length == 0 || text.EndsWith('\n') ? "" : Environment.NewLine;
+        return $"{text}{separator}{setting} = {value};{Environment.NewLine}";
     }
 
     static string EnsureArrayValue(string text, string setting, string value)
@@ -267,7 +276,8 @@ public sealed record ServerCfgInstrumentationResult(bool Complete, string[] Inst
 /// <summary>Adds versioned diagnostic hooks without changing the behavior of existing server-side handlers.</summary>
 public static class ServerCfgInstrumentation
 {
-    public const string Marker = "A3MGR_PLAYER_V2";
+    public const string Marker = "A3MGR_PLAYER_V3";
+    public const string InvalidV2Marker = "A3MGR_PLAYER_V2";
     public const string LegacyMarker = "A3MGR_PLAYER_V1";
     static readonly (string Name, string Event)[] Handlers =
     [
@@ -300,13 +310,13 @@ public static class ServerCfgInstrumentation
                 continue;
             }
 
-            // server.cfg handlers run in Arma's restricted administration VM. `format` is not available
-            // there, while diag_log, str, + and getUserInfo are. Keep CONNECTED self-contained so the
-            // event can include Steam UID/name even when BattlEye RCon is unavailable.
-            var hook = eventName == "CONNECTED"
-                ? $"diag_log (\"\"{Marker}|{eventName}|\"\" + str (_this + [getUserInfo (_this select 0)]));"
-                : $"diag_log (\"\"{Marker}|{eventName}|\"\" + str _this);";
+            // server.cfg handlers run in Arma's restricted administration VM. Keep the hook limited to
+            // commands supported there; richer identity comes from Arma's natural connection log line.
+            var hook = $"diag_log (\"\"{Marker}|{eventName}|\"\" + str _this);";
             var legacyHook = $"diag_log format [\"\"{LegacyMarker}|{eventName}|%1\"\",_this];";
+            var invalidV2Hook = eventName == "CONNECTED"
+                ? $"diag_log (\"\"{InvalidV2Marker}|{eventName}|\"\" + str (_this + [getUserInfo (_this select 0)]));"
+                : $"diag_log (\"\"{InvalidV2Marker}|{eventName}|\"\" + str _this);";
             if (matches.Count == 0)
             {
                 text = text.TrimEnd() + $"\n{name} = \"{hook}\";\n";
@@ -319,6 +329,7 @@ public static class ServerCfgInstrumentation
             // touching the user's original handler body and remains byte-for-byte idempotent afterward.
             var body = match.Groups["body"].Value
                 .Replace(legacyHook, "", StringComparison.Ordinal)
+                .Replace(invalidV2Hook, "", StringComparison.Ordinal)
                 .Replace(hook, "", StringComparison.Ordinal);
             var replacement = $"{match.Groups["indent"].Value}{name} = \"{hook}{body}\";";
             text = text[..match.Index] + replacement + text[(match.Index + match.Length)..];
@@ -426,19 +437,29 @@ public static class MissionConfig
     }
 }
 
-/// <summary>Writes or removes the BattlEye RCon config BE discovers under &lt;profiles&gt;/battleye/BEServer.cfg.</summary>
+/// <summary>Writes or removes the BattlEye RCon config for the effective server profile and binary.</summary>
 public static class BattlEyeConfigWriter
 {
-    public static async Task ApplyAsync(ServerPaths paths, AppConfig cfg)
+    static readonly string[] KnownNames = ["BEServer.cfg", "BEServer_x64.cfg", "beserver.cfg", "beserver_x64.cfg"];
+
+    public static async Task ApplyAsync(StartupSettings settings, AppConfig cfg)
     {
-        var directory = Path.Combine(paths.ProfilesDir, "battleye");
-        var file = Path.Combine(directory, "BEServer.cfg");
-        if (string.IsNullOrWhiteSpace(cfg.RconPassword))
+        var directory = Path.Combine(settings.ProfilesDir, "battleye");
+        var enabled = !settings.DisableBattleEye && !string.IsNullOrWhiteSpace(cfg.RconPassword);
+        var targetName = settings.ServerBinary.Contains("x64", StringComparison.OrdinalIgnoreCase) ? "BEServer_x64.cfg" : "BEServer.cfg";
+
+        if (Directory.Exists(directory))
         {
-            if (File.Exists(file)) File.Delete(file);
-            return;
+            foreach (var name in KnownNames)
+            {
+                var stale = Path.Combine(directory, name);
+                if ((!enabled || !name.Equals(targetName, StringComparison.Ordinal)) && File.Exists(stale)) File.Delete(stale);
+            }
         }
+        if (!enabled) return;
+
         Directory.CreateDirectory(directory);
-        await File.WriteAllTextAsync(file, $"RConPassword {cfg.RconPassword}\nRConPort {cfg.RconPort}\n");
+        var file = Path.Combine(directory, targetName);
+        await File.WriteAllTextAsync(file, $"RConPassword {cfg.RconPassword}\nRConPort {cfg.RconPort}\nRConIP 127.0.0.1\n");
     }
 }

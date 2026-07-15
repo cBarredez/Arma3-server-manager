@@ -20,7 +20,7 @@ query_port = 2303
 battleye_port = 2304
 von_port = 2305
 # BattlEye RCon port, reachable only from within the container (127.0.0.1).
-rcon_port = 2306
+rcon_port = 2301
 max_players = 40
 memory_limit = "25g"
 network_mode = "bridge"

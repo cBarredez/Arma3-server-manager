@@ -10,7 +10,6 @@ var builder = WebApplication.CreateBuilder(args);
 var config = AppConfig.Load(builder.Environment.ContentRootPath);
 await FactoryResetExecutor.ExecutePendingAsync(config);
 var paths = await ServerPaths.DetectAsync(config);
-await BattlEyeConfigWriter.ApplyAsync(paths, config);
 var store = new SqliteStore(Path.Combine(config.Arma3Dir, "manager.sqlite3"));
 await store.InitAsync();
 await store.MigrateJsonStateAsync(paths);

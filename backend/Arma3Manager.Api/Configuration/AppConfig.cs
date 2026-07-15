@@ -69,7 +69,7 @@ public sealed record AppConfig(
             Int(values, "server.query_port", 2303),
             Int(values, "server.battleye_port", 2304),
             Int(values, "server.von_port", 2305),
-            Int(values, "server.rcon_port", 2306),
+            Int(values, "server.rcon_port", 2301),
             Text(values, "server.rcon_password", ""),
             Int(values, "server.max_players", 40),
             Text(values, "server.memory_limit", "25g"),
@@ -99,6 +99,8 @@ public sealed record AppConfig(
         int[] gamePorts = [ServerPort, ServerQueryPort, BattleEyePort, VonPort, RconPort, WebPort];
         if (gamePorts.Distinct().Count() != gamePorts.Length)
             throw new InvalidDataException("server.port, server.query_port, server.battleye_port, server.von_port, server.rcon_port and web.port must all be different");
+        if (RconPort >= ServerPort && RconPort <= ServerPort + 4)
+            throw new InvalidDataException($"server.rcon_port must be outside Arma's reserved UDP range {ServerPort}-{ServerPort + 4}");
         if (ServerMaxPlayers is < 1 or > 500) throw new InvalidDataException("server.max_players must be between 1 and 500");
         if (HistoryRetentionDays is < 1 or > 3650) throw new InvalidDataException("history.retention_days must be between 1 and 3650");
         if (string.IsNullOrWhiteSpace(Arma3Dir) || !Path.IsPathRooted(Arma3Dir))

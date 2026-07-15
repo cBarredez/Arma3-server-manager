@@ -115,6 +115,8 @@ def manager_config() -> dict:
     game_ports = [server.get(name) for name in ("port", "query_port", "battleye_port", "von_port", "rcon_port")]
     if len(set(game_ports)) != len(game_ports):
         raise SystemExit("server UDP ports must be different")
+    if server["port"] <= server["rcon_port"] <= server["port"] + 4:
+        raise SystemExit(f"server.rcon_port must be outside Arma's reserved UDP range {server['port']}-{server['port'] + 4}")
     if server.get("network_mode") == "host" and web.get("port") == web.get("public_port"):
         raise SystemExit("host mode requires different web.port and web.public_port values")
     return config
