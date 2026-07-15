@@ -34,3 +34,7 @@ creator_dlc_app_ids = []
 timezone = "UTC"
 mock_server = false
 mock_steamcmd = false
+
+[history]
+# Player/session history retention. IPs and game identifiers are stored locally for this period.
+retention_days = 90

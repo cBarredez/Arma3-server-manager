@@ -29,3 +29,6 @@ creator_dlc_app_ids = []
 timezone = "UTC"
 mock_server = false
 mock_steamcmd = false
+
+[history]
+retention_days = 90

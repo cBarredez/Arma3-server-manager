@@ -23,6 +23,8 @@ public sealed class BattlEyeRconClient(AppConfig cfg) : IAsyncDisposable
     TaskCompletionSource<bool>? loginResult;
 
     public bool IsConnected { get; private set; }
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(cfg.RconPassword);
+    public event Action<string>? ServerMessageReceived;
 
     public async Task<string> SendCommandAsync(string command, CancellationToken ct = default)
     {
@@ -137,6 +139,7 @@ public sealed class BattlEyeRconClient(AppConfig cfg) : IAsyncDisposable
                         break;
                     case RconServerMessage message:
                         _ = client.SendAsync(BattlEyeProtocol.BuildMessageAck(message.Sequence), ct);
+                        ServerMessageReceived?.Invoke(message.Text);
                         break;
                 }
             }

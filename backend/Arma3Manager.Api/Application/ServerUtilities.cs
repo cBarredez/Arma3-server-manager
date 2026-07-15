@@ -237,6 +237,76 @@ public static class ServerCfgWriter
     }
 }
 
+public sealed record ServerCfgInstrumentationResult(bool Complete, string[] Instrumented, string[] Errors);
+
+/// <summary>Adds versioned diagnostic hooks without changing the behavior of existing server-side handlers.</summary>
+public static class ServerCfgInstrumentation
+{
+    public const string Marker = "A3MGR_PLAYER_V1";
+    static readonly (string Name, string Event)[] Handlers =
+    [
+        ("onUserConnected", "CONNECTED"),
+        ("onUserDisconnected", "DISCONNECTED"),
+        ("onUserKicked", "KICKED"),
+        ("doubleIdDetected", "DUPLICATE_ID"),
+        ("onUnsignedData", "UNSIGNED_DATA"),
+        ("onHackedData", "HACKED_DATA"),
+        ("onDifferentData", "DIFFERENT_DATA")
+    ];
+
+    public static async Task<ServerCfgInstrumentationResult> ApplyAsync(string path, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return new(false, [], ["server.cfg was not found"]);
+
+        var original = await File.ReadAllTextAsync(path, ct);
+        var text = original;
+        var instrumented = new List<string>();
+        var errors = new List<string>();
+
+        foreach (var (name, eventName) in Handlers)
+        {
+            var pattern = "(?im)^(?<indent>[ \\t]*)" + Regex.Escape(name) + "[ \\t]*=[ \\t]*\"(?<body>(?:\"\"|[^\"\\r\\n])*)\"[ \\t]*;";
+            var matches = Regex.Matches(text, pattern);
+            if (matches.Count > 1)
+            {
+                errors.Add($"{name} is defined more than once");
+                continue;
+            }
+
+            var hook = $"diag_log format [\"\"{Marker}|{eventName}|%1\"\",_this];";
+            if (matches.Count == 0)
+            {
+                text = text.TrimEnd() + $"\n{name} = \"{hook}\";\n";
+                instrumented.Add(name);
+                continue;
+            }
+
+            var match = matches[0];
+            var body = match.Groups["body"].Value;
+            if (body.Contains($"{Marker}|{eventName}|", StringComparison.Ordinal))
+            {
+                instrumented.Add(name);
+                continue;
+            }
+            var replacement = $"{match.Groups["indent"].Value}{name} = \"{hook}{body}\";";
+            text = text[..match.Index] + replacement + text[(match.Index + match.Length)..];
+            instrumented.Add(name);
+        }
+
+        if (text != original)
+        {
+            var backup = path + ".a3mgr.bak";
+            if (!File.Exists(backup)) File.Copy(path, backup);
+            var temporary = path + $".a3mgr-{Guid.NewGuid():N}.tmp";
+            await File.WriteAllTextAsync(temporary, text, ct);
+            File.Move(temporary, path, true);
+        }
+
+        return new(errors.Count == 0 && instrumented.Count == Handlers.Length, instrumented.ToArray(), errors.ToArray());
+    }
+}
+
 public static class MissionConfig
 {
     // ServerPaths.MissionsDir is resolved once at process startup and can predate the mpmissions folder

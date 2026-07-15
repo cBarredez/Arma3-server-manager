@@ -30,7 +30,8 @@ public sealed record AppConfig(
     string? FrontendOrigin,
     string TimeZone,
     bool MockServer,
-    bool MockSteamCmd)
+    bool MockSteamCmd,
+    int HistoryRetentionDays)
 {
     /// <summary>Loads public configuration and overlays an optional private secrets file.</summary>
     public static AppConfig Load(string contentRoot)
@@ -80,7 +81,8 @@ public sealed record AppConfig(
             EmptyToNull(Text(values, "web.frontend_origin", "")),
             Text(values, "runtime.timezone", "UTC"),
             Bool(values, "runtime.mock_server", false),
-            Bool(values, "runtime.mock_steamcmd", false));
+            Bool(values, "runtime.mock_steamcmd", false),
+            Int(values, "history.retention_days", 90));
 
         return config.Validate();
     }
@@ -98,6 +100,7 @@ public sealed record AppConfig(
         if (gamePorts.Distinct().Count() != gamePorts.Length)
             throw new InvalidDataException("server.port, server.query_port, server.battleye_port, server.von_port, server.rcon_port and web.port must all be different");
         if (ServerMaxPlayers is < 1 or > 500) throw new InvalidDataException("server.max_players must be between 1 and 500");
+        if (HistoryRetentionDays is < 1 or > 3650) throw new InvalidDataException("history.retention_days must be between 1 and 3650");
         if (string.IsNullOrWhiteSpace(Arma3Dir) || !Path.IsPathRooted(Arma3Dir))
             throw new InvalidDataException("server.arma3_dir must be an absolute path");
         if (NetworkMode is not ("bridge" or "host"))
