@@ -588,6 +588,8 @@ function initDashboard() {
   }).catch(() => {});
 
   initChart();
+  loadSessions();
+  document.getElementById('btn-refresh-sessions').onclick = () => loadSessions();
 
   document.getElementById('btn-install-server').onclick = async event => {
     const button = event.currentTarget;
@@ -605,6 +607,73 @@ function initDashboard() {
       button.innerHTML = original;
     }
   };
+}
+
+async function loadSessions() {
+  const body = document.getElementById('sessions-table-body');
+  if (!body) return;
+  try {
+    const sessions = await GET('/api/metrics/sessions');
+    if (!sessions.length) {
+      body.innerHTML = '<tr><td colspan="6" class="text-muted">No sessions recorded yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = sessions.map(session => {
+      const started = new Date(session.startedAt);
+      const endMs = session.endedAt ? new Date(session.endedAt).getTime() : Date.now();
+      const duration = formatDuration(endMs - started.getTime());
+      const cpu = `${fmtPercent(session.avgCpuPercent)} / ${fmtPercent(session.peakCpuPercent)}`;
+      const ram = `${fmtPercent(session.avgMemoryPercent)} / ${fmtPercent(session.peakMemoryPercent)}`;
+      const ongoing = session.endedAt ? '' : ' <span class="badge bg-success ms-1">Live</span>';
+      return `
+        <tr>
+          <td>${started.toLocaleString()}${ongoing}</td>
+          <td>${duration}</td>
+          <td>${cpu}</td>
+          <td>${session.coresCapacity?.toFixed(1) ?? '—'}</td>
+          <td>${ram}</td>
+          <td class="text-end">
+            <button class="btn btn-sm btn-outline-secondary" data-download-session="${escAttr(session.runId)}" title="Download CSV">
+              <i class="fa fa-download"></i>
+            </button>
+          </td>
+        </tr>`;
+    }).join('');
+    body.querySelectorAll('[data-download-session]').forEach(btn => {
+      btn.onclick = () => downloadSessionCsv(btn.dataset.downloadSession);
+    });
+  } catch {
+    body.innerHTML = '<tr><td colspan="6" class="text-danger">Failed to load sessions.</td></tr>';
+  }
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+async function downloadSessionCsv(runId) {
+  try {
+    const res = await fetch(apiUrl(`/api/metrics/sessions/${encodeURIComponent(runId)}/csv`), {
+      credentials: API_BASE ? 'include' : 'same-origin',
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `session-${runId}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    toast(`Could not download session CSV: ${e.message}`, 'error');
+  }
 }
 
 function getJoinAddress(status) {

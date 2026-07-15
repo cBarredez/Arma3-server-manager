@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Globalization;
+using Arma3Manager.Api.Application;
 using Arma3Manager.Api.Configuration;
 using Arma3Manager.Api.Contracts;
+using Arma3Manager.Api.Infrastructure.Persistence;
 
 namespace Arma3Manager.Api.Infrastructure;
 
@@ -10,11 +12,15 @@ public sealed record CpuMetrics(double? Load, double[] Cores);
 public sealed record HostMetricsSample(CpuMetrics Cpu, double? Temperature);
 public sealed record MemoryMetrics(long Total, long Used, long Free, long Cache, long Current, double Percent);
 
-/// <summary>Samples cumulative cgroup counters independently from HTTP polling.</summary>
-public sealed class MetricsSampler(ILogger<MetricsSampler> logger) : BackgroundService
+/// <summary>Samples cumulative cgroup counters independently from HTTP polling, and — while a game session is
+/// running — records a lower-frequency history of those samples per RunId so CPU/RAM usage for a match can be
+/// reviewed or exported after the fact (issue: "Añadir métricas solicitadas").</summary>
+public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState runtime, SqliteStore store) : BackgroundService
 {
     static readonly TimeSpan Interval = TimeSpan.FromSeconds(1);
+    static readonly TimeSpan PersistInterval = TimeSpan.FromSeconds(5);
     HostMetricsSample current = new(new CpuMetrics(null, []), null);
+    DateTime lastPersistedUtc = DateTime.MinValue;
 
     public HostMetricsSample Current => Volatile.Read(ref current);
 
@@ -23,6 +29,7 @@ public sealed class MetricsSampler(ILogger<MetricsSampler> logger) : BackgroundS
         var previousUsage = MetricsReader.ReadCpuUsageMicroseconds();
         var previousTimestamp = Stopwatch.GetTimestamp();
         Volatile.Write(ref current, new HostMetricsSample(new CpuMetrics(null, []), MetricsReader.ReadCpuTemperature()));
+        await PruneOldSessionsAsync();
 
         using var timer = new PeriodicTimer(Interval);
         while (await timer.WaitForNextTickAsync(stoppingToken))
@@ -39,6 +46,8 @@ public sealed class MetricsSampler(ILogger<MetricsSampler> logger) : BackgroundS
                 Volatile.Write(ref current, new HostMetricsSample(new CpuMetrics(load, []), MetricsReader.ReadCpuTemperature()));
                 previousUsage = usage;
                 previousTimestamp = timestamp;
+
+                await PersistIfDueAsync(load, capacity);
             }
             catch (Exception exception)
             {
@@ -48,6 +57,30 @@ public sealed class MetricsSampler(ILogger<MetricsSampler> logger) : BackgroundS
                 previousTimestamp = Stopwatch.GetTimestamp();
             }
         }
+    }
+
+    async Task PersistIfDueAsync(double? load, double capacity)
+    {
+        if (!runtime.IsRunning || runtime.RunId is null) return;
+        var now = DateTime.UtcNow;
+        if (now - lastPersistedUtc < PersistInterval) return;
+        lastPersistedUtc = now;
+
+        try
+        {
+            var memory = MetricsReader.ReadMemory();
+            await store.InsertMetricsSampleAsync(new MetricsSample(runtime.RunId, DateTimeOffset.UtcNow, load, capacity, memory.Used, memory.Percent));
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Unable to persist session metrics sample");
+        }
+    }
+
+    async Task PruneOldSessionsAsync()
+    {
+        try { await store.PruneMetricsSessionsAsync(); }
+        catch (Exception exception) { logger.LogWarning(exception, "Unable to prune old metrics sessions"); }
     }
 }
 

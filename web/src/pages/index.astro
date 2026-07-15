@@ -197,6 +197,33 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
             </div>
           </div>
         </div>
+
+        <div class="card-panel mt-4">
+          <div class="panel-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-table-list me-2"></i>Session Metrics</span>
+            <button id="btn-refresh-sessions" class="btn btn-sm btn-outline-secondary" title="Refresh sessions">
+              <i class="fa fa-rotate"></i>
+            </button>
+          </div>
+          <div class="small text-muted mt-1 mb-2">CPU and RAM usage recorded per game session. Download a session as CSV.</div>
+          <div class="table-responsive">
+            <table class="table table-sm table-dark align-middle mb-0">
+              <thead>
+                <tr>
+                  <th>Started</th>
+                  <th>Duration</th>
+                  <th>Avg / Peak CPU</th>
+                  <th>Cores</th>
+                  <th>Avg / Peak RAM</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="sessions-table-body">
+                <tr><td colspan="6" class="text-muted">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       <!-- ── MODS ───────────────────────────────────────────────── -->
