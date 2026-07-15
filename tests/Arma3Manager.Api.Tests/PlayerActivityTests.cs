@@ -1,6 +1,7 @@
 using Arma3Manager.Api.Application;
 using Arma3Manager.Api.Contracts;
 using Arma3Manager.Api.Infrastructure.Persistence;
+using Microsoft.Data.Sqlite;
 using Xunit;
 
 namespace Arma3Manager.Api.Tests;
@@ -32,7 +33,27 @@ public sealed class PlayerActivityTests
         Assert.Contains("customCommand _this", twice);
         Assert.Contains("kick (_this select 0)", twice);
         Assert.Equal(7, Count(twice, ServerCfgInstrumentation.Marker));
+        Assert.DoesNotContain(ServerCfgInstrumentation.LegacyMarker, twice);
+        Assert.DoesNotContain("diag_log format", twice);
+        Assert.Contains("getUserInfo (_this select 0)", twice);
         Assert.True(File.Exists(path + ".a3mgr.bak"));
+    }
+
+    [Fact]
+    public async Task ServerCfgInstrumentationUpgradesBrokenV1Hook()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "server.cfg");
+        await File.WriteAllTextAsync(path, "onUserConnected = \"diag_log format [\"\"A3MGR_PLAYER_V1|CONNECTED|%1\"\",_this];customCommand _this\";");
+
+        var result = await ServerCfgInstrumentation.ApplyAsync(path);
+        var text = await File.ReadAllTextAsync(path);
+
+        Assert.True(result.Complete);
+        Assert.DoesNotContain("diag_log format", text);
+        Assert.DoesNotContain(ServerCfgInstrumentation.LegacyMarker, text);
+        Assert.Contains("A3MGR_PLAYER_V2|CONNECTED|", text);
+        Assert.Contains("customCommand _this", text);
     }
 
     [Fact]
@@ -52,7 +73,7 @@ public sealed class PlayerActivityTests
     }
 
     [Fact]
-    public void ParsesAuthoritativeKickReasonAndPreservesRawEvidence()
+    public void ParsesKickReasonAsInferredUntilServerTypeIdsAreValidated()
     {
         var entry = new LogEntry("rpt", "14:05:00 A3MGR_PLAYER_V1|KICKED|[\"42\",4,\"Missing addon ace_main\"]", DateTimeOffset.UtcNow, Source: "arma", RunId: "run-1");
 
@@ -61,8 +82,72 @@ public sealed class PlayerActivityTests
         Assert.Equal("42", signal.NetworkId);
         Assert.Equal("missing_addon", signal.ReasonCode);
         Assert.Equal("Missing addon ace_main", signal.ReasonText);
-        Assert.Equal("authoritative", signal.Confidence);
+        Assert.Equal("inferred", signal.Confidence);
         Assert.Equal(entry.Data, signal.RawText);
+    }
+
+    [Fact]
+    public void RejectsArmaExpressionErrorContainingManagedMarker()
+    {
+        var entry = new LogEntry("stderr",
+            "21:37:15 Error in expression <diag_log format [\"A3MGR_PLAYER_V1|CONNECTED|%1\",_this];>",
+            DateTimeOffset.UtcNow, Source: "arma", RunId: "run-1");
+
+        Assert.False(PlayerSignalParser.TryParse(entry, out var signal));
+        Assert.Null(signal);
+    }
+
+    [Fact]
+    public void ParsesV2ConnectionWithSteamIdentity()
+    {
+        var entry = new LogEntry("stdout",
+            "21:37:15 \"A3MGR_PLAYER_V2|CONNECTED|[\"42\",[\"42\",3,\"76561198000000000\",\"Alpha\",\"Alpha\",\"local\",10,false,0,[45,1000,0],objNull]]\"",
+            DateTimeOffset.UtcNow, Source: "arma", RunId: "run-1");
+
+        Assert.True(PlayerSignalParser.TryParse(entry, out var signal));
+        Assert.Equal("42", signal!.NetworkId);
+        Assert.Equal("76561198000000000", signal.SteamUid);
+        Assert.Equal("Alpha", signal.Name);
+        Assert.Equal("authoritative", signal.Confidence);
+    }
+
+    [Fact]
+    public void ParsesV2ConnectionAsEscapedRptString()
+    {
+        var entry = new LogEntry("rpt",
+            "21:37:15 \"A3MGR_PLAYER_V2|CONNECTED|[\"\"42\"\",[\"\"42\"\",3,\"\"76561198000000000\"\",\"\"Alpha\"\",\"\"Alpha\"\",\"\"local\"\",10,false,0,[45,1000,0],objNull]]\"",
+            DateTimeOffset.UtcNow, Source: "arma", RunId: "run-1");
+
+        Assert.True(PlayerSignalParser.TryParse(entry, out var signal));
+        Assert.Equal("42", signal!.NetworkId);
+        Assert.Equal("76561198000000000", signal.SteamUid);
+        Assert.Equal("Alpha", signal.Name);
+    }
+
+    [Fact]
+    public void RejectsHeadlessAndMalformedStructuredConnections()
+    {
+        var headless = new LogEntry("stdout",
+            "A3MGR_PLAYER_V2|CONNECTED|[\"42\",[\"42\",3,\"HC12160\",\"HC1\",\"HC1\",\"local\",10,true]]",
+            DateTimeOffset.UtcNow, Source: "arma", RunId: "run-1");
+        var malformed = new LogEntry("stdout", "A3MGR_PLAYER_V2|CONNECTED|[\"%1\",_this]",
+            DateTimeOffset.UtcNow, Source: "arma", RunId: "run-1");
+
+        Assert.False(PlayerSignalParser.TryParse(headless, out _));
+        Assert.False(PlayerSignalParser.TryParse(malformed, out _));
+    }
+
+    [Fact]
+    public void PreservesAnonymousWrongPasswordRejection()
+    {
+        var entry = new LogEntry("stderr", "21:37:15 Cannot join the session. Wrong password was given.",
+            DateTimeOffset.UtcNow, Source: "arma", RunId: "run-1");
+
+        Assert.True(PlayerSignalParser.TryParse(entry, out var signal));
+        Assert.Equal("rejected", signal!.Kind);
+        Assert.Equal("wrong_password", signal.ReasonCode);
+        Assert.Null(signal.NetworkId);
+        Assert.Equal("inferred", signal.Confidence);
     }
 
     [Fact]
@@ -122,6 +207,56 @@ public sealed class PlayerActivityTests
         Assert.Equal("0123456789abcdef", connection.BattlEyeGuid);
         Assert.Equal("Alpha", connection.Name);
         Assert.Equal(2, (await store.GetPlayerEventsAsync(connection.Id)).Count);
+    }
+
+    [Fact]
+    public async Task RconRosterEnrichesHookConnectionThatAlreadyHasSteamIdentity()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new SqliteStore(Path.Combine(directory.Path, "manager.sqlite3"));
+        await store.InitAsync();
+        var started = DateTimeOffset.UtcNow;
+        await store.StartServerSessionAsync(new("run-1", started, 123));
+
+        await store.ApplyPlayerSignalAsync(new PlayerSignal(
+            "run-1", started.AddSeconds(1), "connected", "server_hooks", "authoritative",
+            "hook connected", "hook-1", NetworkId: "42", SteamUid: "76561198000000000", Name: "Alpha", Admitted: true));
+        await store.ApplyPlayerSignalAsync(new PlayerSignal(
+            "run-1", started.AddSeconds(5), "rcon_seen", "rcon_roster", "authoritative",
+            "rcon verified", "rcon-1", BattlEyeGuid: "0123456789abcdef", RconPlayerId: 7,
+            Name: "Alpha", Ip: "203.0.113.7", Admitted: true));
+
+        var connection = Assert.Single((await store.GetPlayerConnectionsAsync("run-1", null, null, null, null, 50)).Items);
+        Assert.Equal("76561198000000000", connection.SteamUid);
+        Assert.Equal("0123456789abcdef", connection.BattlEyeGuid);
+        Assert.Equal("203.0.113.7", connection.Ip);
+    }
+
+    [Fact]
+    public async Task V2MigrationRemovesFalseExpressionConnections()
+    {
+        using var directory = new TemporaryDirectory();
+        var dbPath = Path.Combine(directory.Path, "manager.sqlite3");
+        var store = new SqliteStore(dbPath);
+        await store.InitAsync();
+        var started = DateTimeOffset.UtcNow;
+        await store.StartServerSessionAsync(new("run-1", started, 123));
+        await store.ApplyPlayerSignalAsync(new PlayerSignal(
+            "run-1", started.AddSeconds(1), "connected", "arma", "authoritative",
+            "Error in expression <diag_log format [\"A3MGR_PLAYER_V1|CONNECTED|%1\",_this];>",
+            "bad-event", NetworkId: "%1,_this];>", Admitted: true));
+
+        await using (var connection = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync();
+            var resetMigration = connection.CreateCommand();
+            resetMigration.CommandText = "delete from schema_migrations where version=2";
+            await resetMigration.ExecuteNonQueryAsync();
+        }
+
+        await store.InitAsync();
+
+        Assert.Empty((await store.GetPlayerConnectionsAsync("run-1", null, null, null, null, 50)).Items);
     }
 
     static int Count(string value, string needle) => (value.Length - value.Replace(needle, "").Length) / needle.Length;
