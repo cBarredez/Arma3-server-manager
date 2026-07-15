@@ -2,12 +2,15 @@
    Arma 3 Server Manager — Frontend SPA
    ═══════════════════════════════════════════════════════════════════════════ */
 import {
-  LOG_DOM_LIMIT,
+  CircularLogBuffer,
+  LOG_BUFFER_LIMIT,
+  LOG_ROW_HEIGHT,
   LogConnectionGate,
   advanceLogCursor,
   countMissingLogEntries,
   isNearLogBottom,
-  trimLogContainer,
+  shouldStreamLogs,
+  virtualLogRange,
 } from './log-viewer.js';
 import { buildPlayerQuery, connectionIdentity, friendlyReason } from './player-activity.js';
 
@@ -264,6 +267,11 @@ function initNav() {
   });
   window.addEventListener('online', () => {
     if (state.view === 'logs') restartLogStream(document.getElementById('log-output'));
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (state.view !== 'logs' || activeLogPanel !== 'live') return;
+    if (document.hidden) stopLogStream('Paused', 'secondary');
+    else activateLiveConsole();
   });
 
 }
@@ -1886,8 +1894,21 @@ let playerSearchTimer = null;
 function initLogWorkspace() {
   if (logWorkspaceInitialized) return;
   logWorkspaceInitialized = true;
-  document.querySelectorAll('[data-log-panel]').forEach(button => {
+  const tabs = [...document.querySelectorAll('[data-log-panel]')];
+  tabs.forEach(button => {
     button.addEventListener('click', () => selectLogPanel(button.dataset.logPanel));
+    button.addEventListener('keydown', event => {
+      const current = tabs.indexOf(button);
+      const target = event.key === 'Home' ? 0
+        : event.key === 'End' ? tabs.length - 1
+        : event.key === 'ArrowRight' ? (current + 1) % tabs.length
+        : event.key === 'ArrowLeft' ? (current - 1 + tabs.length) % tabs.length
+        : -1;
+      if (target < 0) return;
+      event.preventDefault();
+      tabs[target].focus();
+      selectLogPanel(tabs[target].dataset.logPanel);
+    });
   });
   document.getElementById('btn-refresh-player-activity').onclick = () => loadPlayerActivity(false);
   document.getElementById('btn-refresh-log-sessions').onclick = () => loadLogSessions(false);
@@ -1908,16 +1929,32 @@ function initLogWorkspace() {
 
 function selectLogPanel(panel) {
   activeLogPanel = ['live', 'players', 'sessions'].includes(panel) ? panel : 'live';
-  document.querySelectorAll('[data-log-panel]').forEach(button => button.classList.toggle('active', button.dataset.logPanel === activeLogPanel));
-  document.querySelectorAll('[data-log-panel-content]').forEach(content => content.classList.toggle('d-none', content.dataset.logPanelContent !== activeLogPanel));
+  document.querySelectorAll('[data-log-panel]').forEach(button => {
+    const active = button.dataset.logPanel === activeLogPanel;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll('[data-log-panel-content]').forEach(content => {
+    const active = content.dataset.logPanelContent === activeLogPanel;
+    content.classList.toggle('d-none', !active);
+    content.hidden = !active;
+  });
   if (state.view !== 'logs') return;
   if (activeLogPanel === 'players') {
+    stopLogStream('Paused', 'secondary');
     if (!logSessions.length) loadLogSessions(false, true);
     else loadPlayerActivity(false);
     startPlayerActivityPolling();
   } else {
     stopPlayerActivityPolling();
-    if (activeLogPanel === 'sessions') loadLogSessions(false);
+    if (activeLogPanel === 'sessions') {
+      stopLogStream('Paused', 'secondary');
+      loadLogSessions(false);
+    } else {
+      scheduleLogRender(document.getElementById('log-output'), true);
+      activateLiveConsole();
+    }
   }
 }
 
@@ -2193,15 +2230,22 @@ function tableMessage(colspan, message, className = 'text-muted') {
 
 // ─── log SSE state ────────────────────────────────────────────────────────────
 const logConnections = new LogConnectionGate();
+const logBuffer = new CircularLogBuffer(LOG_BUFFER_LIMIT);
 const LOG_STALE_AFTER_MS = 40_000;
+const LOG_RENDER_INTERVAL_MS = 50;
 let logCursor = 0;
 let logLastActivity = 0;
 let logWatchdog = null;
 let logRenderFrame = null;
-let logRenderQueue = [];
+let logRenderTimer = null;
+let logLastRenderAt = 0;
 let logUnseenCount = 0;
 let logGapRecovery = false;
 let logAuthCheckPending = false;
+let logConsoleInitialized = false;
+let logHistoryLoaded = false;
+let logStickToBottom = false;
+let logMaxLineChars = 100;
 
 function setLogStreamStatus(label, style) {
   const status = document.getElementById('log-stream-status');
@@ -2216,9 +2260,10 @@ function clearLogWatchdog() {
 }
 
 function cancelPendingLogRender() {
+  if (logRenderTimer) window.clearTimeout(logRenderTimer);
   if (logRenderFrame) window.cancelAnimationFrame(logRenderFrame);
+  logRenderTimer = null;
   logRenderFrame = null;
-  logRenderQueue = [];
 }
 
 function stopLogStream(label = 'Paused', style = 'secondary') {
@@ -2230,24 +2275,22 @@ function stopLogStream(label = 'Paused', style = 'secondary') {
 
 async function loadLogs() {
   initLogWorkspace();
+  initVirtualLogConsole();
   refreshPlayerTrackingStatus();
   loadLogSessions(false, activeLogPanel === 'players');
   selectLogPanel(pendingLogSession ? 'players' : activeLogPanel);
-  const generation = logConnections.begin();
-  clearLogWatchdog();
-  cancelPendingLogRender();
-  setLogStreamStatus('Connecting', 'secondary');
-  const out = document.getElementById('log-output');
-  out.replaceChildren();
-  logCursor = 0;
-  logUnseenCount = 0;
-  updateNewLogCount();
-  hideLogNotice();
+}
 
+function initVirtualLogConsole() {
+  if (logConsoleInitialized) return;
+  logConsoleInitialized = true;
+  const out = document.getElementById('log-output');
   document.getElementById('btn-clear-logs').onclick = () => {
-    out.replaceChildren();
+    logBuffer.clear({ preserveCursor: true });
+    logMaxLineChars = 100;
     logUnseenCount = 0;
     updateNewLogCount();
+    scheduleLogRender(out, true);
   };
   document.getElementById('log-new-lines').onclick = () => scrollLogsToLive(out);
   out.onscroll = () => {
@@ -2255,31 +2298,43 @@ async function loadLogs() {
       logUnseenCount = 0;
       updateNewLogCount();
     }
+    scheduleLogRender(out, true);
   };
+  scheduleLogRender(out, true);
+}
 
-  // Load historical logs first
-  try {
-    const entries = await GET('/api/logs?limit=300');
-    if (!logConnections.isCurrent(generation)) return;
-    if (entries.length) {
-      const fragment = document.createDocumentFragment();
-      entries.forEach(entry => fragment.appendChild(createLogLine(entry)));
-      out.appendChild(fragment);
-      trimLogContainer(out);
-      logCursor = advanceLogCursor(0, entries.at(-1)?.id);
-    }
-  } catch (e) {
-    if (!logConnections.isCurrent(generation)) return;
-    showLogNotice('Could not load log history: ' + e.message, 'danger');
+async function activateLiveConsole() {
+  if (!shouldStreamLogs(state.view, activeLogPanel, document.hidden)) {
+    if (state.view === 'logs' && activeLogPanel === 'live' && document.hidden) stopLogStream('Paused', 'secondary');
+    return;
   }
+  const out = document.getElementById('log-output');
+  if (logConnections.hasSource) return;
 
-  if (document.getElementById('log-autoscroll')?.checked) out.scrollTop = out.scrollHeight;
-  if (logConnections.isCurrent(generation)) startLogStream(out, generation);
+  const generation = logConnections.begin();
+  clearLogWatchdog();
+  setLogStreamStatus('Connecting', 'secondary');
+  if (!logHistoryLoaded) {
+    hideLogNotice();
+    try {
+      const entries = await GET('/api/logs?limit=500');
+      if (!logConnections.isCurrent(generation) || !shouldStreamLogs(state.view, activeLogPanel, document.hidden)) return;
+      logBuffer.clear();
+      logCursor = 0;
+      ingestLogEntries(out, entries, true);
+    } catch (error) {
+      if (logConnections.isCurrent(generation)) showLogNotice('Could not load log history: ' + error.message, 'danger');
+    } finally {
+      if (logConnections.isCurrent(generation)) logHistoryLoaded = true;
+    }
+  }
+  if (logConnections.isCurrent(generation) && shouldStreamLogs(state.view, activeLogPanel, document.hidden))
+    startLogStream(out, generation);
 }
 
 function startLogStream(out, generation) {
   setLogStreamStatus('Connecting', 'secondary');
-  const url = apiUrl(`/api/logs/stream?since=${logCursor}`);
+  const url = apiUrl(`/api/logs/stream?since=${logCursor}&batch=1`);
   const source = new EventSource(url, { withCredentials: true });
   if (!logConnections.attach(generation, source)) return;
   logLastActivity = Date.now();
@@ -2294,13 +2349,19 @@ function startLogStream(out, generation) {
     if (!logConnections.owns(generation, source)) return;
     touchLogStream();
     try {
-      const entry = JSON.parse(e.data);
-      const entryId = Number(entry.id) || 0;
-      if (entryId && entryId <= logCursor) return;
-      logCursor = advanceLogCursor(logCursor, entryId);
-      queueLogLine(out, entry);
+      ingestLogEntries(out, [JSON.parse(e.data)]);
     } catch { showLogNotice('A malformed log event was ignored.', 'warning'); }
   };
+
+  source.addEventListener('logs', e => {
+    if (!logConnections.owns(generation, source)) return;
+    touchLogStream();
+    try {
+      const payload = JSON.parse(e.data);
+      if (!Array.isArray(payload?.entries)) throw new Error('entries missing');
+      ingestLogEntries(out, payload.entries);
+    } catch { showLogNotice('A malformed log batch was ignored.', 'warning'); }
+  });
 
   source.addEventListener('status', e => {
     if (!logConnections.owns(generation, source)) return;
@@ -2344,7 +2405,7 @@ function startLogStream(out, generation) {
 }
 
 function restartLogStream(out) {
-  if (!out || state.view !== 'logs') return;
+  if (!out || !shouldStreamLogs(state.view, activeLogPanel, document.hidden)) return;
   const generation = logConnections.begin();
   clearLogWatchdog();
   startLogStream(out, generation);
@@ -2382,15 +2443,13 @@ async function recoverFromLogGap(out, gap, generation, source) {
   clearLogWatchdog();
   cancelPendingLogRender();
   try {
-    const entries = await GET(`/api/logs?limit=${LOG_DOM_LIMIT}`);
+    const entries = await GET('/api/logs?limit=1000');
     if (!logConnections.isCurrent(recoveryGeneration)) return;
-    out.replaceChildren();
-    const fragment = document.createDocumentFragment();
-    entries.forEach(entry => fragment.appendChild(createLogLine(entry)));
-    out.appendChild(fragment);
-    trimLogContainer(out);
-    logCursor = advanceLogCursor(0, entries.at(-1)?.id);
-    scrollLogsToLive(out);
+    logBuffer.clear();
+    logCursor = 0;
+    logMaxLineChars = 100;
+    scheduleLogRender(out, true);
+    ingestLogEntries(out, entries, true);
     startLogStream(out, recoveryGeneration);
   } catch (error) {
     if (logConnections.isCurrent(recoveryGeneration)) {
@@ -2403,38 +2462,69 @@ async function recoverFromLogGap(out, gap, generation, source) {
   }
 }
 
-function queueLogLine(out, entry) {
-  logRenderQueue.push({ out, entry });
-  if (logRenderFrame) return;
-  logRenderFrame = window.requestAnimationFrame(flushLogRenderQueue);
+function ingestLogEntries(out, entries, forceStick = false) {
+  if (!out || !entries?.length) return;
+  const stickToBottom = forceStick || (document.getElementById('log-autoscroll')?.checked && isNearLogBottom(out));
+  const accepted = [];
+  for (const entry of entries) {
+    const entryId = Number(entry?.id) || 0;
+    if (entryId && entryId <= logCursor) continue;
+    logCursor = advanceLogCursor(logCursor, entryId);
+    accepted.push(entry);
+    logMaxLineChars = Math.max(logMaxLineChars, Math.min(4096, stripAnsi(entry?.data).length + 32));
+  }
+  const result = logBuffer.appendMany(accepted);
+  if (!result.added) return;
+  if (!stickToBottom && result.expired) out.scrollTop = Math.max(0, out.scrollTop - result.expired * LOG_ROW_HEIGHT);
+  if (stickToBottom) {
+    logStickToBottom = true;
+    logUnseenCount = 0;
+  } else logUnseenCount += result.added;
+  updateNewLogCount();
+  scheduleLogRender(out);
 }
 
-function flushLogRenderQueue() {
+function scheduleLogRender(out, immediate = false) {
+  if (!out || logRenderTimer || logRenderFrame) return;
+  const elapsed = performance.now() - logLastRenderAt;
+  const delay = immediate ? 0 : Math.max(0, LOG_RENDER_INTERVAL_MS - elapsed);
+  logRenderTimer = window.setTimeout(() => {
+    logRenderTimer = null;
+    logRenderFrame = window.requestAnimationFrame(() => renderVirtualLogs(out));
+  }, delay);
+}
+
+function renderVirtualLogs(out) {
   logRenderFrame = null;
-  const pending = logRenderQueue;
-  logRenderQueue = [];
-  if (!pending.length) return;
-  const out = pending[0].out;
-  const stickToBottom = document.getElementById('log-autoscroll')?.checked && isNearLogBottom(out);
-  const previousScrollTop = out.scrollTop;
-  const fragment = document.createDocumentFragment();
-  pending.forEach(({ entry }) => fragment.appendChild(createLogLine(entry)));
-  out.appendChild(fragment);
-  const trimmed = trimLogContainer(out);
-  if (stickToBottom) {
-    out.scrollTop = out.scrollHeight;
-    logUnseenCount = 0;
-  } else {
-    if (trimmed.height) out.scrollTop = Math.max(0, previousScrollTop - trimmed.height);
-    logUnseenCount += pending.length;
+  logLastRenderAt = performance.now();
+  const spacer = document.getElementById('log-virtual-spacer');
+  const rows = document.getElementById('log-virtual-rows');
+  if (!spacer || !rows) return;
+
+  const totalHeight = logBuffer.length * LOG_ROW_HEIGHT;
+  spacer.style.height = `${totalHeight}px`;
+  spacer.style.minWidth = `${logMaxLineChars}ch`;
+  if (logStickToBottom) {
+    out.scrollTop = Math.max(0, totalHeight - out.clientHeight);
+    logStickToBottom = false;
   }
-  updateNewLogCount();
+  const range = virtualLogRange({
+    total: logBuffer.length,
+    scrollTop: out.scrollTop,
+    clientHeight: out.clientHeight,
+  });
+  const fragment = document.createDocumentFragment();
+  logBuffer.slice(range.start, range.end).forEach(entry => fragment.appendChild(createLogLine(entry)));
+  rows.replaceChildren(fragment);
+  rows.style.transform = `translateY(${range.offset}px)`;
+  updateLogBufferStatus();
 }
 
 function scrollLogsToLive(out) {
-  out.scrollTop = out.scrollHeight;
+  logStickToBottom = true;
   logUnseenCount = 0;
   updateNewLogCount();
+  scheduleLogRender(out, true);
 }
 
 function updateNewLogCount() {
@@ -2443,6 +2533,14 @@ function updateNewLogCount() {
   if (!button || !count) return;
   count.textContent = logUnseenCount.toLocaleString();
   button.classList.toggle('d-none', logUnseenCount === 0);
+}
+
+function updateLogBufferStatus() {
+  const status = document.getElementById('log-buffer-status');
+  if (!status) return;
+  status.textContent = logBuffer.expiredCount
+    ? `${logBuffer.length.toLocaleString()} retained · ${logBuffer.expiredCount.toLocaleString()} expired`
+    : `${logBuffer.length.toLocaleString()} / ${LOG_BUFFER_LIMIT.toLocaleString()} retained`;
 }
 
 function showLogNotice(message, style = 'warning') {
@@ -2460,15 +2558,15 @@ function hideLogNotice() {
 }
 
 function appendLog(entry) {
-  if (state.view !== 'logs') return;
+  if (state.view !== 'logs' || activeLogPanel !== 'live') return;
   const out = document.getElementById('log-output');
-  queueLogLine(out, entry);
+  ingestLogEntries(out, [entry]);
 }
 
 function createLogLine(entry, includeTime = true) {
   const severity = logSeverity(entry);
   const labels = { error: 'ERR', warning: 'WARN', success: 'OK', system: 'SYS', output: 'OUT', rpt: 'RPT' };
-  const line = document.createElement('span');
+  const line = document.createElement('div');
   line.className = 'log-line';
   line.dataset.source = entry.source || 'manager';
   if (entry.runId) line.dataset.runId = entry.runId;
@@ -2482,7 +2580,7 @@ function createLogLine(entry, includeTime = true) {
   const level = document.createElement('span');
   level.className = `log-level log-${severity}`;
   level.textContent = `[${labels[severity]}]`;
-  line.append(level, document.createTextNode(` ${stripAnsi(entry.data)}\n`));
+  line.append(level, document.createTextNode(` ${stripAnsi(entry.data)}`));
   return line;
 }
 

@@ -475,12 +475,18 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
         </div>
 
         <div class="log-workspace-tabs" role="tablist" aria-label="Server log views">
-          <button class="active" type="button" data-log-panel="live"><i class="fa fa-wave-square"></i> Live Console</button>
-          <button type="button" data-log-panel="players"><i class="fa fa-user-shield"></i> Player Activity</button>
-          <button type="button" data-log-panel="sessions"><i class="fa fa-clock-rotate-left"></i> Sessions</button>
+          <button id="log-tab-live" class="active" type="button" role="tab" aria-selected="true" aria-controls="log-panel-live" tabindex="0" data-log-panel="live">
+            <span class="log-tab-icon"><i class="fa fa-wave-square"></i></span><span class="log-tab-copy"><strong>Live Console</strong><small>Streaming</small></span>
+          </button>
+          <button id="log-tab-players" type="button" role="tab" aria-selected="false" aria-controls="log-panel-players" tabindex="-1" data-log-panel="players">
+            <span class="log-tab-icon"><i class="fa fa-user-shield"></i></span><span class="log-tab-copy"><strong>Player Activity</strong><small>Access</small></span>
+          </button>
+          <button id="log-tab-sessions" type="button" role="tab" aria-selected="false" aria-controls="log-panel-sessions" tabindex="-1" data-log-panel="sessions">
+            <span class="log-tab-icon"><i class="fa fa-clock-rotate-left"></i></span><span class="log-tab-copy"><strong>Sessions</strong><small>History</small></span>
+          </button>
         </div>
 
-        <section class="log-workspace-panel" data-log-panel-content="live">
+        <section id="log-panel-live" class="log-workspace-panel" role="tabpanel" aria-labelledby="log-tab-live" tabindex="0" data-log-panel-content="live">
           <div class="card-panel">
             <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
               <span class="d-flex align-items-center gap-2">
@@ -488,6 +494,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
                 <span id="log-stream-status" class="badge text-bg-secondary">Connecting</span>
               </span>
               <div class="d-flex align-items-center flex-wrap gap-2">
+                <span id="log-buffer-status" class="log-buffer-status">0 / 5,000 retained</span>
                 <button id="log-new-lines" type="button" class="log-new-lines d-none">
                   <span id="log-new-lines-count">0</span> new · Jump to live
                 </button>
@@ -499,11 +506,13 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
               </div>
             </div>
             <div id="log-stream-notice" class="log-stream-notice d-none" role="status" aria-live="polite"></div>
-            <pre id="log-output" class="log-box log-workspace-console mt-2"></pre>
+            <div id="log-output" class="log-box log-workspace-console log-viewport mt-2" role="log" aria-label="Live server log" aria-live="off" tabindex="0">
+              <div id="log-virtual-spacer" class="log-virtual-spacer"><div id="log-virtual-rows" class="log-virtual-rows"></div></div>
+            </div>
           </div>
         </section>
 
-        <section class="log-workspace-panel d-none" data-log-panel-content="players">
+        <section id="log-panel-players" class="log-workspace-panel d-none" role="tabpanel" aria-labelledby="log-tab-players" tabindex="0" hidden data-log-panel-content="players">
           <div class="card-panel">
             <div class="activity-toolbar">
               <div class="activity-field activity-session-field"><label for="player-session-select">Session</label><select id="player-session-select" class="form-select form-select-sm"></select></div>
@@ -530,7 +539,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
           </div>
         </section>
 
-        <section class="log-workspace-panel d-none" data-log-panel-content="sessions">
+        <section id="log-panel-sessions" class="log-workspace-panel d-none" role="tabpanel" aria-labelledby="log-tab-sessions" tabindex="0" hidden data-log-panel-content="sessions">
           <div class="card-panel">
             <div class="panel-header d-flex justify-content-between align-items-center"><span><i class="fa fa-clock-rotate-left me-2"></i>Server run history</span><button id="btn-refresh-log-sessions" class="btn btn-sm btn-outline-secondary"><i class="fa fa-rotate"></i></button></div>
             <div class="table-responsive">
