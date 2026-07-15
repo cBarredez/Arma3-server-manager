@@ -35,6 +35,45 @@ public sealed class ConfigurationTests
     }
 
     [Fact]
+    public void RconPortInsideArmaReservedRangeFailsFast()
+    {
+        var file = Path.GetTempFileName();
+        File.WriteAllText(file, "[web]\npassword=\"secure-password\"\nsession_secret=\"01234567890123456789012345678901\"\n[server]\narma3_dir=\"/arma3\"\nport=2302\nrcon_port=2306\n");
+        var error = Assert.Throws<InvalidDataException>(() => AppConfig.LoadFiles(file));
+        Assert.Contains("reserved UDP range 2302-2306", error.Message);
+    }
+
+    [Fact]
+    public async Task BattlEyeConfigUsesEffectiveX64ProfileAndIsRemovedWhenDisabled()
+    {
+        using var directory = new TemporaryDirectory();
+        var publicFile = Path.Combine(directory.Path, "manager.toml");
+        File.WriteAllText(publicFile,
+            "[web]\npassword=\"secure-password\"\nsession_secret=\"01234567890123456789012345678901\"\n" +
+            "[server]\narma3_dir=\"/arma3\"\nport=2302\nrcon_port=2301\nrcon_password=\"rcon-secret\"\n");
+        var config = AppConfig.LoadFiles(publicFile);
+        var paths = TestPaths(directory.Path);
+        var customProfiles = Path.Combine(directory.Path, "custom-profiles");
+        var settings = TestSettings(paths, "", 0) with { ProfilesDir = customProfiles };
+        var directoryPath = Path.Combine(customProfiles, "battleye");
+        Directory.CreateDirectory(directoryPath);
+        await File.WriteAllTextAsync(Path.Combine(directoryPath, "BEServer.cfg"), "stale");
+
+        await BattlEyeConfigWriter.ApplyAsync(settings, config);
+
+        var target = Path.Combine(directoryPath, "BEServer_x64.cfg");
+        Assert.True(File.Exists(target));
+        Assert.False(File.Exists(Path.Combine(directoryPath, "BEServer.cfg")));
+        var text = await File.ReadAllTextAsync(target);
+        Assert.Contains("RConPassword rcon-secret", text);
+        Assert.Contains("RConPort 2301", text);
+        Assert.Contains("RConIP 127.0.0.1", text);
+
+        await BattlEyeConfigWriter.ApplyAsync(settings with { DisableBattleEye = true }, config);
+        Assert.False(File.Exists(target));
+    }
+
+    [Fact]
     public void PathGuardRejectsSiblingPrefixTraversal()
     {
         var root = Path.Combine(Path.GetTempPath(), "arma3");
@@ -92,6 +131,7 @@ public sealed class ConfigurationTests
         Assert.Contains("192.0.2.10", twice);
         Assert.Equal(2, Count(twice, "127.0.0.1"));
         Assert.Contains("password = \"protected\";", twice);
+        Assert.Contains("BattlEye = 1;", twice);
     }
 
     [Fact]
@@ -110,6 +150,22 @@ public sealed class ConfigurationTests
         Assert.Contains("headlessClients[] = { \"127.0.0.1\" };", enabled);
         Assert.Contains("localClient[] = { \"127.0.0.1\" };", enabled);
         Assert.Equal(enabled, disabled);
+    }
+
+    [Fact]
+    public async Task StartupBattlEyeChoiceIsAppliedToServerCfg()
+    {
+        using var directory = new TemporaryDirectory();
+        var paths = TestPaths(directory.Path);
+        Directory.CreateDirectory(paths.ConfigDir);
+        await File.WriteAllTextAsync(paths.ConfigDir + "/server.cfg", "BattlEye = 1;\n");
+        var enabled = TestSettings(paths, "", 0);
+
+        await ServerCfgWriter.ApplyAsync(enabled with { DisableBattleEye = true });
+        Assert.Contains("BattlEye = 0;", await File.ReadAllTextAsync(enabled.ServerCfg));
+
+        await ServerCfgWriter.ApplyAsync(enabled with { DisableBattleEye = false });
+        Assert.Contains("BattlEye = 1;", await File.ReadAllTextAsync(enabled.ServerCfg));
     }
 
     [Fact]

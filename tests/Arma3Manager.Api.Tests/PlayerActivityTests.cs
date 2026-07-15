@@ -1,7 +1,9 @@
 using Arma3Manager.Api.Application;
+using Arma3Manager.Api.Configuration;
 using Arma3Manager.Api.Contracts;
 using Arma3Manager.Api.Infrastructure.Persistence;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace Arma3Manager.Api.Tests;
@@ -35,7 +37,7 @@ public sealed class PlayerActivityTests
         Assert.Equal(7, Count(twice, ServerCfgInstrumentation.Marker));
         Assert.DoesNotContain(ServerCfgInstrumentation.LegacyMarker, twice);
         Assert.DoesNotContain("diag_log format", twice);
-        Assert.Contains("getUserInfo (_this select 0)", twice);
+        Assert.DoesNotContain("getUserInfo", twice);
         Assert.True(File.Exists(path + ".a3mgr.bak"));
     }
 
@@ -52,8 +54,29 @@ public sealed class PlayerActivityTests
         Assert.True(result.Complete);
         Assert.DoesNotContain("diag_log format", text);
         Assert.DoesNotContain(ServerCfgInstrumentation.LegacyMarker, text);
-        Assert.Contains("A3MGR_PLAYER_V2|CONNECTED|", text);
+        Assert.Contains("A3MGR_PLAYER_V3|CONNECTED|", text);
         Assert.Contains("customCommand _this", text);
+    }
+
+    [Fact]
+    public async Task ServerCfgInstrumentationRemovesInvalidV2GetUserInfoHook()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "server.cfg");
+        await File.WriteAllTextAsync(path,
+            "onUserConnected = \"diag_log (\"\"A3MGR_PLAYER_V2|CONNECTED|\"\" + str (_this + [getUserInfo (_this select 0)]));customCommand _this\";");
+
+        var result = await ServerCfgInstrumentation.ApplyAsync(path);
+        var once = await File.ReadAllTextAsync(path);
+        await ServerCfgInstrumentation.ApplyAsync(path);
+        var twice = await File.ReadAllTextAsync(path);
+
+        Assert.True(result.Complete);
+        Assert.Equal(once, twice);
+        Assert.DoesNotContain(ServerCfgInstrumentation.InvalidV2Marker, twice);
+        Assert.DoesNotContain("getUserInfo", twice);
+        Assert.Contains("A3MGR_PLAYER_V3|CONNECTED|", twice);
+        Assert.Contains("customCommand _this", twice);
     }
 
     [Fact]
@@ -109,6 +132,79 @@ public sealed class PlayerActivityTests
         Assert.Equal("76561198000000000", signal.SteamUid);
         Assert.Equal("Alpha", signal.Name);
         Assert.Equal("authoritative", signal.Confidence);
+    }
+
+    [Fact]
+    public void ParsesNaturalConnectionFromRealArmaLogWithSteamIdentity()
+    {
+        var entry = new LogEntry("rpt", "22:52:33 Player DDI.NOVEMBER connected (id=76561198074208173).",
+            DateTimeOffset.UtcNow, Source: "arma", RunId: "run-1");
+
+        Assert.True(PlayerSignalParser.TryParse(entry, out var signal));
+        Assert.Equal("connected", signal!.Kind);
+        Assert.Equal("DDI.NOVEMBER", signal.Name);
+        Assert.Equal("76561198074208173", signal.SteamUid);
+        Assert.Null(signal.NetworkId);
+        Assert.True(signal.Admitted);
+        Assert.Equal("authoritative", signal.Confidence);
+    }
+
+    [Fact]
+    public async Task NaturalDisconnectClosesConnectionBySteamUid()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new SqliteStore(Path.Combine(directory.Path, "manager.sqlite3"));
+        await store.InitAsync();
+        var started = DateTimeOffset.UtcNow;
+        await store.StartServerSessionAsync(new("run-1", started, 123));
+        var connectedEntry = new LogEntry("rpt", "22:52:33 Player Name With Spaces connected (id=76561198074208173).",
+            started.AddSeconds(1), Source: "arma", RunId: "run-1");
+        var disconnectedEntry = connectedEntry with
+        {
+            Data = "23:01:02 Player Name With Spaces disconnected (id=76561198074208173).",
+            Ts = started.AddMinutes(9)
+        };
+
+        Assert.True(PlayerSignalParser.TryParse(connectedEntry, out var connected));
+        Assert.True(PlayerSignalParser.TryParse(disconnectedEntry, out var disconnected));
+        await store.ApplyPlayerSignalsAsync([connected!, disconnected!]);
+
+        var connection = Assert.Single((await store.GetPlayerConnectionsAsync("run-1", null, null, null, null, 50)).Items);
+        Assert.False(connection.Active);
+        Assert.Equal("76561198074208173", connection.SteamUid);
+        Assert.Equal(2, (await store.GetPlayerEventsAsync(connection.Id)).Count);
+    }
+
+    [Fact]
+    public async Task TrackingStateTreatsDisabledBattlEyeAsCompleteIdentityTracking()
+    {
+        using var directory = new TemporaryDirectory();
+        var configFile = Path.Combine(directory.Path, "manager.toml");
+        await File.WriteAllTextAsync(configFile,
+            $"[web]\npassword=\"secure-password\"\nsession_secret=\"01234567890123456789012345678901\"\n" +
+            $"[server]\narma3_dir=\"{directory.Path}\"\nrcon_port=2301\nrcon_password=\"rcon-secret\"\n");
+        var config = AppConfig.LoadFiles(configFile);
+        var logHub = new LogHub();
+        var runtime = new RuntimeState(logHub);
+        var store = new SqliteStore(Path.Combine(directory.Path, "manager.sqlite3"));
+        await using var rcon = new BattlEyeRconClient(config);
+        using var service = new PlayerActivityService(NullLogger<PlayerActivityService>.Instance, config, runtime, logHub, rcon, store);
+        service.ReportInstrumentation(new(true, ["onUserConnected"], []));
+
+        service.ConfigureForRun(false);
+        var identity = service.State;
+        Assert.Equal("full", identity.Mode);
+        Assert.Equal("log_identity", identity.Profile);
+        Assert.Contains("steamUid", identity.AvailableFields!);
+        Assert.DoesNotContain("ip", identity.AvailableFields!);
+        Assert.Null(identity.LastError);
+
+        service.ConfigureForRun(true);
+        var enriched = service.State;
+        Assert.Equal("partial", enriched.Mode);
+        Assert.Equal("battleye_enriched", enriched.Profile);
+        Assert.Contains("ip", enriched.AvailableFields!);
+        Assert.Contains("battlEyeGuid", enriched.AvailableFields!);
     }
 
     [Fact]
@@ -307,6 +403,35 @@ public sealed class PlayerActivityTests
         Assert.Equal(2, remaining.Count);
         Assert.Contains(remaining, connection => connection.SteamUid == "76561198000000000");
         Assert.Contains(remaining, connection => connection.ReasonText == "Password validation failed for another reason");
+    }
+
+    [Fact]
+    public async Task V4MigrationBackfillsNaturalSteamIdentityWithoutOverwritingName()
+    {
+        using var directory = new TemporaryDirectory();
+        var dbPath = Path.Combine(directory.Path, "manager.sqlite3");
+        var store = new SqliteStore(dbPath);
+        await store.InitAsync();
+        var started = DateTimeOffset.UtcNow;
+        await store.StartServerSessionAsync(new("run-1", started, 123));
+        await store.ApplyPlayerSignalAsync(new PlayerSignal(
+            "run-1", started.AddSeconds(1), "connected", "arma", "inferred",
+            "22:52:33 Player DDI.NOVEMBER connected (id=76561198074208173).", "legacy-natural",
+            Name: "Preserved Name", Admitted: true));
+
+        await using (var connection = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync();
+            var resetMigration = connection.CreateCommand();
+            resetMigration.CommandText = "delete from schema_migrations where version=4";
+            await resetMigration.ExecuteNonQueryAsync();
+        }
+
+        await store.InitAsync();
+
+        var repaired = Assert.Single((await store.GetPlayerConnectionsAsync("run-1", null, null, null, null, 50)).Items);
+        Assert.Equal("76561198074208173", repaired.SteamUid);
+        Assert.Equal("Preserved Name", repaired.Name);
     }
 
     static int Count(string value, string needle) => (value.Length - value.Replace(needle, "").Length) / needle.Length;

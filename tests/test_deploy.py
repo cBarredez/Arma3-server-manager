@@ -20,7 +20,7 @@ class DeployConfigTests(unittest.TestCase):
         deploy.MANAGER_FILE.write_text(
             '[web]\nport=8080\npublic_port=8080\nbind_ip="0.0.0.0"\n'
             '[server]\narma3_dir="/arma3"\nport=2302\nquery_port=2303\n'
-            'battleye_port=2304\nvon_port=2305\nrcon_port=2306\nnetwork_mode="bridge"\n',
+            'battleye_port=2304\nvon_port=2305\nrcon_port=2301\nnetwork_mode="bridge"\n',
             encoding="utf-8",
         )
         deploy.SECRETS_FILE.write_text(
@@ -39,6 +39,12 @@ class DeployConfigTests(unittest.TestCase):
 
     def test_duplicate_game_ports_are_rejected(self):
         text = deploy.MANAGER_FILE.read_text(encoding="utf-8").replace("query_port=2303", "query_port=2302")
+        deploy.MANAGER_FILE.write_text(text, encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            deploy.manager_config()
+
+    def test_rcon_port_in_arma_reserved_range_is_rejected(self):
+        text = deploy.MANAGER_FILE.read_text(encoding="utf-8").replace("rcon_port=2301", "rcon_port=2306")
         deploy.MANAGER_FILE.write_text(text, encoding="utf-8")
         with self.assertRaises(SystemExit):
             deploy.manager_config()
