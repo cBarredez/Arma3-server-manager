@@ -390,6 +390,12 @@ html, body {
   margin: 0;
 }
 .log-line { display: block; color: #a8b5c8; }
+.log-buffer-status {
+  color: #788497;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: .66rem;
+  white-space: nowrap;
+}
 .log-new-lines {
   appearance: none;
   background: rgba(105, 183, 255, .1);
@@ -457,28 +463,97 @@ html, body {
 .tracking-full { background: rgba(var(--success-rgb), .1); border-color: rgba(var(--success-rgb), .45); color: #74dda1; }
 .tracking-partial { background: rgba(var(--warning-rgb), .08); border-color: rgba(var(--warning-rgb), .4); color: #f5bd67; }
 .log-workspace-tabs {
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  gap: 1.4rem;
+  background: #1c1c20;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-bottom: 1rem;
   overflow-x: auto;
+  padding: 4px;
 }
 .log-workspace-tabs button {
-  background: none;
-  border: 0;
-  border-bottom: 2px solid transparent;
+  align-items: center;
+  appearance: none;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  border-radius: 5px;
   color: var(--text-muted);
   cursor: pointer;
+  display: flex;
+  gap: .65rem;
   font-size: .8rem;
   font-weight: 650;
-  margin-bottom: -1px;
-  padding: .65rem .1rem;
+  min-width: 0;
+  padding: .58rem .72rem;
+  text-align: left;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
   white-space: nowrap;
 }
-.log-workspace-tabs button i { margin-right: .4rem; }
-.log-workspace-tabs button:hover { color: var(--text-primary); }
-.log-workspace-tabs button.active { border-bottom-color: var(--accent); color: var(--text-primary); }
-.log-workspace-console { max-height: calc(100vh - 330px); min-height: 440px; }
+.log-workspace-tabs button:hover { background: rgba(255,255,255,.025) !important; color: var(--text-primary); }
+.log-workspace-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.log-workspace-tabs button.active {
+  background: var(--accent-soft) !important;
+  border-color: rgba(var(--accent-rgb), .42) !important;
+  box-shadow: inset 3px 0 0 var(--accent);
+  color: var(--text-primary);
+}
+.log-tab-icon {
+  align-items: center;
+  background: #151518;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: #858595;
+  display: inline-flex;
+  flex: 0 0 29px;
+  height: 29px;
+  justify-content: center;
+  transition: border-color .15s ease, color .15s ease;
+}
+.log-workspace-tabs button.active .log-tab-icon { border-color: rgba(var(--accent-rgb), .5); color: #a994ff; }
+.log-tab-copy { display: flex; flex-direction: column; line-height: 1.05; min-width: 0; }
+.log-tab-copy strong { font-size: .76rem; font-weight: 700; }
+.log-tab-copy small {
+  color: #73737d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: .58rem;
+  letter-spacing: .1em;
+  margin-top: .28rem;
+  text-transform: uppercase;
+}
+.log-workspace-tabs button.active .log-tab-copy small { color: #a69acb; }
+.log-workspace-panel:focus { outline: none; }
+.log-workspace-console { height: calc(100vh - 330px); max-height: none; min-height: 440px; }
+.log-viewport {
+  contain: layout paint style;
+  overflow: auto;
+  overflow-anchor: none;
+  padding: 0;
+  position: relative;
+  white-space: nowrap;
+  word-break: normal;
+}
+.log-virtual-spacer { min-height: 0; position: relative; }
+.log-virtual-rows {
+  left: 0;
+  min-width: 100%;
+  position: absolute;
+  top: 0;
+  width: max-content;
+  will-change: transform;
+}
+.log-virtual-rows .log-line {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: .74rem;
+  height: 20px;
+  line-height: 20px;
+  overflow: hidden;
+  padding: 0 1rem;
+  text-overflow: clip;
+  white-space: pre;
+}
+.log-virtual-rows .log-line:hover { background: rgba(255,255,255,.025); }
 .activity-toolbar {
   align-items: end;
   display: grid;
@@ -553,6 +628,10 @@ html, body {
 }
 @media (max-width: 720px) {
   .log-workspace-header { align-items: flex-start; flex-direction: column; }
+  .log-workspace-tabs { display: flex; }
+  .log-workspace-tabs button { flex: 0 0 auto; min-width: 145px; }
+  .log-tab-copy small { display: none; }
+  .log-workspace-console { height: calc(100vh - 360px); min-height: 360px; }
   .activity-toolbar { grid-template-columns: 1fr; }
   .activity-search-field { grid-column: auto; }
   .activity-stats { grid-template-columns: 1fr 1fr; }
@@ -749,10 +828,9 @@ html, body {
 .preset-item:hover { background: var(--surface-alt); }
 
 /* ─── Form controls ─────────────────────────────────────────────────────
-   Prefixed with `body` so these beat Bootstrap's same-named utility
-   classes: Vite injects bootstrap.min.css as a <style> tag AFTER this
-   stylesheet's <link>, so equal-specificity selectors would otherwise
-   lose the cascade to Bootstrap's defaults. */
+   Prefixed with `body` to keep these panel tokens resilient to Bootstrap's
+   component selectors. This stylesheet is imported after Bootstrap and is
+   emitted as part of Astro's versioned asset bundle. */
 body .form-control, body .form-select {
   background: var(--surface-alt);
   border: 1px solid var(--border);

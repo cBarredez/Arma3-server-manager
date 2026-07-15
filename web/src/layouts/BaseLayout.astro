@@ -2,6 +2,7 @@
 import 'bootstrap/dist/css/bootstrap.min.css';
 import '@fortawesome/fontawesome-free/css/all.min.css';
 import '../styles/astro.css';
+import '../styles/app.css';
 
 interface Props { title: string }
 const { title } = Astro.props;
@@ -16,7 +17,6 @@ const { title } = Astro.props;
     <meta name="description" content="Panel de control del servidor Arma 3 de Brigada 46" />
     <title>{title}</title>
     <link rel="preload" href="/assets/brigada_46.png" as="image" />
-    <link rel="stylesheet" href="/css/style.css" />
     <script is:inline src="/config.js"></script>
   </head>
   <body>
