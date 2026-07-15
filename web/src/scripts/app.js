@@ -9,6 +9,7 @@ import {
   isNearLogBottom,
   trimLogContainer,
 } from './log-viewer.js';
+import { buildPlayerQuery, connectionIdentity, friendlyReason } from './player-activity.js';
 
 'use strict';
 
@@ -273,7 +274,11 @@ function loadView(name, pushState = true, filePath = null) {
   document.querySelectorAll('[data-view]').forEach(l => l.classList.remove('active'));
 
   // Close log stream when leaving the logs tab
-  if (state.view === 'logs' && name !== 'logs') stopLogStream();
+  if (state.view === 'logs' && name !== 'logs') {
+    stopLogStream();
+    stopPlayerActivityPolling();
+    cancelPlayerHistoryRequests();
+  }
 
   document.getElementById(`view-${name}`).classList.remove('d-none');
   document.querySelector(`[data-view="${name}"]`)?.classList.add('active');
@@ -633,6 +638,9 @@ async function loadSessions() {
           <td>${session.coresCapacity?.toFixed(1) ?? '—'}</td>
           <td>${ram}</td>
           <td class="text-end">
+            <button class="btn btn-sm btn-outline-primary me-1" data-open-log-session="${escAttr(session.runId)}" title="Inspect player activity">
+              <i class="fa fa-users-viewfinder"></i>
+            </button>
             <button class="btn btn-sm btn-outline-secondary" data-download-session="${escAttr(session.runId)}" title="Download CSV">
               <i class="fa fa-download"></i>
             </button>
@@ -641,6 +649,13 @@ async function loadSessions() {
     }).join('');
     body.querySelectorAll('[data-download-session]').forEach(btn => {
       btn.onclick = () => downloadSessionCsv(btn.dataset.downloadSession);
+    });
+    body.querySelectorAll('[data-open-log-session]').forEach(btn => {
+      btn.onclick = () => {
+        pendingLogSession = btn.dataset.openLogSession;
+        loadView('logs');
+        selectLogPanel('players');
+      };
     });
   } catch {
     body.innerHTML = '<tr><td colspan="6" class="text-danger">Failed to load sessions.</td></tr>';
@@ -1854,6 +1869,328 @@ function getVal(id) { return document.getElementById(id)?.value ?? ''; }
 function setChecked(id, value) { const el = document.getElementById(id); if (el) el.checked = !!value; }
 function getChecked(id) { return !!document.getElementById(id)?.checked; }
 
+// ─── Server Logs workspace ───────────────────────────────────────────────────
+let logWorkspaceInitialized = false;
+let activeLogPanel = 'live';
+let logSessions = [];
+let logSessionsCursor = null;
+let playerConnectionsCursor = null;
+let selectedLogSession = null;
+let pendingLogSession = null;
+let playerActivityTimer = null;
+let playerHistoryAbort = null;
+let sessionHistoryAbort = null;
+let playerDetailModal = null;
+let playerSearchTimer = null;
+
+function initLogWorkspace() {
+  if (logWorkspaceInitialized) return;
+  logWorkspaceInitialized = true;
+  document.querySelectorAll('[data-log-panel]').forEach(button => {
+    button.addEventListener('click', () => selectLogPanel(button.dataset.logPanel));
+  });
+  document.getElementById('btn-refresh-player-activity').onclick = () => loadPlayerActivity(false);
+  document.getElementById('btn-refresh-log-sessions').onclick = () => loadLogSessions(false);
+  document.getElementById('btn-load-more-sessions').onclick = () => loadLogSessions(true);
+  document.getElementById('btn-load-more-players').onclick = () => loadPlayerActivity(true);
+  document.getElementById('player-session-select').onchange = event => {
+    selectedLogSession = event.target.value || null;
+    loadPlayerActivity(false);
+  };
+  document.getElementById('player-outcome-filter').onchange = () => loadPlayerActivity(false);
+  document.getElementById('player-reason-filter').onchange = () => loadPlayerActivity(false);
+  document.getElementById('player-search').oninput = () => {
+    window.clearTimeout(playerSearchTimer);
+    playerSearchTimer = window.setTimeout(() => loadPlayerActivity(false), 300);
+  };
+  playerDetailModal = new bootstrap.Modal(document.getElementById('player-detail-modal'));
+}
+
+function selectLogPanel(panel) {
+  activeLogPanel = ['live', 'players', 'sessions'].includes(panel) ? panel : 'live';
+  document.querySelectorAll('[data-log-panel]').forEach(button => button.classList.toggle('active', button.dataset.logPanel === activeLogPanel));
+  document.querySelectorAll('[data-log-panel-content]').forEach(content => content.classList.toggle('d-none', content.dataset.logPanelContent !== activeLogPanel));
+  if (state.view !== 'logs') return;
+  if (activeLogPanel === 'players') {
+    if (!logSessions.length) loadLogSessions(false, true);
+    else loadPlayerActivity(false);
+    startPlayerActivityPolling();
+  } else {
+    stopPlayerActivityPolling();
+    if (activeLogPanel === 'sessions') loadLogSessions(false);
+  }
+}
+
+function startPlayerActivityPolling() {
+  stopPlayerActivityPolling();
+  playerActivityTimer = window.setInterval(() => {
+    if (state.view === 'logs' && activeLogPanel === 'players') loadPlayerActivity(false, true);
+  }, 5_000);
+}
+
+function stopPlayerActivityPolling() {
+  if (playerActivityTimer) window.clearInterval(playerActivityTimer);
+  playerActivityTimer = null;
+}
+
+function cancelPlayerHistoryRequests() {
+  playerHistoryAbort?.abort();
+  sessionHistoryAbort?.abort();
+  playerHistoryAbort = null;
+  sessionHistoryAbort = null;
+}
+
+async function getJsonWithSignal(url, signal) {
+  const response = await fetch(apiUrl(url), { credentials: API_BASE ? 'include' : 'same-origin', signal });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+async function refreshPlayerTrackingStatus() {
+  const chip = document.getElementById('player-tracking-status');
+  try {
+    const status = await GET('/api/server/status');
+    const tracking = status.playerTracking || {};
+    const full = tracking.mode === 'full';
+    chip.className = `tracking-chip ${full ? 'tracking-full' : 'tracking-partial'}`;
+    chip.replaceChildren();
+    const icon = document.createElement('i');
+    icon.className = `fa ${full ? 'fa-shield-check' : 'fa-triangle-exclamation'}`;
+    chip.append(icon, document.createTextNode(full ? ' Full tracking' : ' Partial tracking'));
+    chip.title = tracking.lastError || `Sources: ${(tracking.sources || []).join(', ')}`;
+  } catch {
+    chip.className = 'tracking-chip tracking-partial';
+    chip.textContent = 'Tracking unavailable';
+  }
+}
+
+async function loadLogSessions(append = false, thenPlayers = false) {
+  if (!append) {
+    sessionHistoryAbort?.abort();
+    sessionHistoryAbort = new AbortController();
+    logSessionsCursor = null;
+  }
+  const signal = sessionHistoryAbort?.signal;
+  const query = new URLSearchParams({ limit: '25' });
+  if (append && logSessionsCursor) query.set('cursor', logSessionsCursor);
+  const body = document.getElementById('log-sessions-body');
+  if (!append) body.replaceChildren(tableMessage(8, 'Loading sessions…'));
+  try {
+    const page = await getJsonWithSignal(`/api/sessions?${query}`, signal);
+    if (signal?.aborted) return;
+    logSessions = append ? [...logSessions, ...page.items] : page.items;
+    logSessionsCursor = page.nextCursor;
+    renderLogSessions();
+    updatePlayerSessionSelect();
+    document.getElementById('btn-load-more-sessions').classList.toggle('d-none', !logSessionsCursor);
+    if (thenPlayers || activeLogPanel === 'players') loadPlayerActivity(false);
+  } catch (error) {
+    if (error.name !== 'AbortError') body.replaceChildren(tableMessage(8, `Could not load sessions: ${error.message}`, 'text-danger'));
+  }
+}
+
+function updatePlayerSessionSelect() {
+  const select = document.getElementById('player-session-select');
+  const requested = pendingLogSession;
+  pendingLogSession = null;
+  if (requested && logSessions.some(session => session.runId === requested)) selectedLogSession = requested;
+  if (!selectedLogSession || !logSessions.some(session => session.runId === selectedLogSession))
+    selectedLogSession = logSessions.find(session => !session.endedAt)?.runId || logSessions[0]?.runId || null;
+  select.replaceChildren();
+  logSessions.forEach(session => {
+    const option = document.createElement('option');
+    option.value = session.runId;
+    option.textContent = `${session.endedAt ? '' : '● LIVE · '}${fmtDate(session.startedAt)} · ${session.runId.slice(0, 8)}`;
+    option.selected = session.runId === selectedLogSession;
+    select.appendChild(option);
+  });
+  if (!logSessions.length) {
+    const option = document.createElement('option');
+    option.textContent = 'No sessions recorded';
+    select.appendChild(option);
+  }
+}
+
+function renderLogSessions() {
+  const body = document.getElementById('log-sessions-body');
+  body.replaceChildren();
+  if (!logSessions.length) {
+    body.appendChild(tableMessage(8, 'No sessions recorded yet.'));
+    return;
+  }
+  logSessions.forEach(session => {
+    const row = document.createElement('tr');
+    const end = session.endedAt ? new Date(session.endedAt).getTime() : Date.now();
+    appendCell(row, fmtDate(session.startedAt));
+    appendCell(row, formatDuration(end - new Date(session.startedAt).getTime()));
+    const status = document.createElement('td');
+    status.appendChild(outcomeBadge(session.endedAt ? session.endReason : 'live', session.endedAt ? 'pending' : 'successful'));
+    row.appendChild(status);
+    appendCell(row, session.uniquePlayers);
+    appendCell(row, session.successful);
+    appendCell(row, session.rejected, session.rejected ? 'text-danger' : '');
+    appendCell(row, session.removed, session.removed ? 'text-warning' : '');
+    const action = document.createElement('td');
+    action.className = 'text-end';
+    const button = document.createElement('button');
+    button.className = 'btn btn-sm btn-outline-primary';
+    button.title = 'Inspect player activity';
+    button.innerHTML = '<i class="fa fa-arrow-right"></i>';
+    button.onclick = () => { selectedLogSession = session.runId; updatePlayerSessionSelect(); selectLogPanel('players'); };
+    action.appendChild(button);
+    row.appendChild(action);
+    body.appendChild(row);
+  });
+}
+
+async function loadPlayerActivity(append = false, quiet = false) {
+  if (!selectedLogSession) return;
+  if (!append) {
+    playerHistoryAbort?.abort();
+    playerHistoryAbort = new AbortController();
+    playerConnectionsCursor = null;
+  }
+  const signal = playerHistoryAbort?.signal;
+  const outcome = document.getElementById('player-outcome-filter').value;
+  const reason = document.getElementById('player-reason-filter').value;
+  const search = document.getElementById('player-search').value.trim();
+  const query = buildPlayerQuery({ runId: selectedLogSession, outcome, reasonCode: reason, search, cursor: append ? playerConnectionsCursor : null });
+  const body = document.getElementById('player-activity-body');
+  if (!append && !quiet) body.replaceChildren(tableMessage(6, 'Loading player activity…'));
+  try {
+    const [page, session] = await Promise.all([
+      getJsonWithSignal(`/api/player-connections?${query}`, signal),
+      getJsonWithSignal(`/api/sessions/${encodeURIComponent(selectedLogSession)}`, signal),
+    ]);
+    if (signal?.aborted) return;
+    playerConnectionsCursor = page.nextCursor;
+    renderPlayerConnections(page.items, append);
+    document.getElementById('btn-load-more-players').classList.toggle('d-none', !playerConnectionsCursor);
+    const index = logSessions.findIndex(item => item.runId === session.runId);
+    if (index >= 0) logSessions[index] = session;
+    renderSessionStats(session);
+    refreshPlayerTrackingStatus();
+  } catch (error) {
+    if (error.name !== 'AbortError' && !quiet) body.replaceChildren(tableMessage(6, `Could not load activity: ${error.message}`, 'text-danger'));
+  }
+}
+
+function renderSessionStats(session) {
+  setText('player-stat-success', session?.successful ?? 0);
+  setText('player-stat-rejected', session?.rejected ?? 0);
+  setText('player-stat-removed', session?.removed ?? 0);
+  setText('player-stat-unique', session?.uniquePlayers ?? 0);
+}
+
+function renderPlayerConnections(items, append) {
+  const body = document.getElementById('player-activity-body');
+  if (!append) body.replaceChildren();
+  if (!items.length && !append) {
+    body.appendChild(tableMessage(6, 'No matching player activity for this session.'));
+    return;
+  }
+  items.forEach(connection => {
+    const row = document.createElement('tr');
+    row.className = `outcome-${connection.outcome}`;
+    appendCell(row, new Date(connection.firstSeenAt).toLocaleTimeString());
+    const player = document.createElement('td');
+    const name = document.createElement('span');
+    name.className = 'activity-player-name';
+    name.textContent = connection.name || 'Unidentified player';
+    const meta = document.createElement('span');
+    meta.className = 'activity-player-meta';
+    meta.textContent = connection.ip || 'IP unavailable';
+    player.append(name, meta);
+    row.appendChild(player);
+    const identity = document.createElement('td');
+    identity.className = 'activity-identity';
+    identity.textContent = connectionIdentity(connection);
+    row.appendChild(identity);
+    const outcome = document.createElement('td');
+    outcome.appendChild(outcomeBadge(connection.outcome));
+    row.appendChild(outcome);
+    const reason = document.createElement('td');
+    const code = document.createElement('span');
+    code.className = 'reason-code';
+    code.textContent = friendlyReason(connection.reasonCode);
+    const detail = document.createElement('span');
+    detail.className = 'reason-text';
+    detail.textContent = connection.reasonText || 'No additional reason supplied';
+    reason.append(code, detail);
+    row.appendChild(reason);
+    const action = document.createElement('td');
+    action.className = 'text-end';
+    const button = document.createElement('button');
+    button.className = 'btn btn-sm btn-outline-secondary';
+    button.innerHTML = '<i class="fa fa-magnifying-glass-plus"></i>';
+    button.title = 'View evidence';
+    button.onclick = () => openPlayerDetail(connection);
+    action.appendChild(button);
+    row.appendChild(action);
+    body.appendChild(row);
+  });
+}
+
+async function openPlayerDetail(connection) {
+  const body = document.getElementById('player-detail-body');
+  document.getElementById('player-detail-title').textContent = connection.name || 'Unidentified player';
+  body.replaceChildren();
+  const grid = document.createElement('div');
+  grid.className = 'player-detail-grid';
+  [['Outcome', connection.outcome], ['IP address', connection.ip], ['BattlEye GUID', connection.battlEyeGuid], ['Steam UID', connection.steamUid], ['Network ID', connection.networkId], ['Confidence', connection.confidence]].forEach(([label, value]) => {
+    const field = document.createElement('div');
+    field.className = 'player-detail-field';
+    const caption = document.createElement('span'); caption.textContent = label;
+    const strong = document.createElement('strong'); strong.textContent = value || 'Unavailable';
+    field.append(caption, strong); grid.appendChild(field);
+  });
+  body.appendChild(grid);
+  const loading = document.createElement('p'); loading.className = 'text-muted'; loading.textContent = 'Loading evidence…'; body.appendChild(loading);
+  playerDetailModal.show();
+  try {
+    const events = await GET(`/api/player-connections/${connection.id}/events`);
+    loading.remove();
+    if (!events.length) { const empty = document.createElement('p'); empty.className = 'text-muted'; empty.textContent = 'No evidence events recorded.'; body.appendChild(empty); }
+    events.forEach(event => body.appendChild(renderPlayerEvent(event)));
+  } catch (error) { loading.textContent = `Could not load evidence: ${error.message}`; loading.className = 'text-danger'; }
+}
+
+function renderPlayerEvent(event) {
+  const wrapper = document.createElement('div'); wrapper.className = 'player-event';
+  const head = document.createElement('div'); head.className = 'player-event-head';
+  const kind = document.createElement('span'); kind.className = 'player-event-kind'; kind.textContent = `${event.kind} · ${event.source}`;
+  const time = document.createElement('span'); time.className = 'player-event-time'; time.textContent = fmtDate(event.occurredAt);
+  head.append(kind, time); wrapper.appendChild(head);
+  if (event.reasonText || event.reasonCode) { const reason = document.createElement('div'); reason.className = 'small mt-1'; reason.textContent = `${friendlyReason(event.reasonCode)}${event.reasonText ? ` — ${event.reasonText}` : ''}`; wrapper.appendChild(reason); }
+  const evidence = document.createElement('pre'); evidence.textContent = event.rawText; wrapper.appendChild(evidence);
+  return wrapper;
+}
+
+function outcomeBadge(label, style = label) {
+  const badge = document.createElement('span');
+  badge.className = `outcome-badge outcome-${style}`;
+  badge.textContent = label;
+  return badge;
+}
+
+function appendCell(row, value, className = '') {
+  const cell = document.createElement('td');
+  cell.className = className;
+  cell.textContent = value ?? '—';
+  row.appendChild(cell);
+}
+
+function tableMessage(colspan, message, className = 'text-muted') {
+  const row = document.createElement('tr');
+  const cell = document.createElement('td');
+  cell.colSpan = colspan;
+  cell.className = className;
+  cell.textContent = message;
+  row.appendChild(cell);
+  return row;
+}
+
 // ─── log SSE state ────────────────────────────────────────────────────────────
 const logConnections = new LogConnectionGate();
 const LOG_STALE_AFTER_MS = 40_000;
@@ -1892,6 +2229,10 @@ function stopLogStream(label = 'Paused', style = 'secondary') {
 }
 
 async function loadLogs() {
+  initLogWorkspace();
+  refreshPlayerTrackingStatus();
+  loadLogSessions(false, activeLogPanel === 'players');
+  selectLogPanel(pendingLogSession ? 'players' : activeLogPanel);
   const generation = logConnections.begin();
   clearLogWatchdog();
   cancelPendingLogRender();

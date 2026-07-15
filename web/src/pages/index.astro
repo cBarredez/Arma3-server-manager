@@ -465,28 +465,87 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
 
       <!-- ── LOGS ───────────────────────────────────────────────── -->
       <div id="view-logs" class="view d-none">
-        <div class="card-panel">
-          <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-            <span class="d-flex align-items-center gap-2">
-              <span><i class="fa fa-terminal me-2"></i>Server Logs</span>
-              <span id="log-stream-status" class="badge text-bg-secondary">Connecting</span>
-            </span>
-            <div class="d-flex align-items-center flex-wrap gap-2">
-              <button id="log-new-lines" type="button" class="log-new-lines d-none">
-                <span id="log-new-lines-count">0</span> new · Jump to live
-              </button>
-              <label class="form-check form-switch mb-0 align-items-center d-flex gap-2">
-                <input class="form-check-input" type="checkbox" id="log-autoscroll" checked />
-                <span class="form-check-label small">Auto-scroll</span>
-              </label>
-              <button id="btn-clear-logs" class="btn btn-sm btn-outline-danger">
-                <i class="fa fa-trash"></i>
-              </button>
-            </div>
+        <div class="log-workspace-header">
+          <div>
+            <div class="log-workspace-kicker">OPERATIONS / TELEMETRY</div>
+            <h2 class="log-workspace-title">Server Logs</h2>
+            <p class="log-workspace-subtitle">Live output, player access decisions, and server-run history in one place.</p>
           </div>
-          <div id="log-stream-notice" class="log-stream-notice d-none" role="status" aria-live="polite"></div>
-          <pre id="log-output" class="log-box mt-2"></pre>
+          <span id="player-tracking-status" class="tracking-chip tracking-partial"><i class="fa fa-circle-nodes"></i> Partial tracking</span>
         </div>
+
+        <div class="log-workspace-tabs" role="tablist" aria-label="Server log views">
+          <button class="active" type="button" data-log-panel="live"><i class="fa fa-wave-square"></i> Live Console</button>
+          <button type="button" data-log-panel="players"><i class="fa fa-user-shield"></i> Player Activity</button>
+          <button type="button" data-log-panel="sessions"><i class="fa fa-clock-rotate-left"></i> Sessions</button>
+        </div>
+
+        <section class="log-workspace-panel" data-log-panel-content="live">
+          <div class="card-panel">
+            <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <span class="d-flex align-items-center gap-2">
+                <span><i class="fa fa-terminal me-2"></i>Live output</span>
+                <span id="log-stream-status" class="badge text-bg-secondary">Connecting</span>
+              </span>
+              <div class="d-flex align-items-center flex-wrap gap-2">
+                <button id="log-new-lines" type="button" class="log-new-lines d-none">
+                  <span id="log-new-lines-count">0</span> new · Jump to live
+                </button>
+                <label class="form-check form-switch mb-0 align-items-center d-flex gap-2">
+                  <input class="form-check-input" type="checkbox" id="log-autoscroll" checked />
+                  <span class="form-check-label small">Auto-scroll</span>
+                </label>
+                <button id="btn-clear-logs" class="btn btn-sm btn-outline-danger"><i class="fa fa-trash"></i></button>
+              </div>
+            </div>
+            <div id="log-stream-notice" class="log-stream-notice d-none" role="status" aria-live="polite"></div>
+            <pre id="log-output" class="log-box log-workspace-console mt-2"></pre>
+          </div>
+        </section>
+
+        <section class="log-workspace-panel d-none" data-log-panel-content="players">
+          <div class="card-panel">
+            <div class="activity-toolbar">
+              <div class="activity-field activity-session-field"><label for="player-session-select">Session</label><select id="player-session-select" class="form-select form-select-sm"></select></div>
+              <div class="activity-field activity-search-field"><label for="player-search">Search</label><div class="input-group input-group-sm"><span class="input-group-text"><i class="fa fa-magnifying-glass"></i></span><input id="player-search" class="form-control" placeholder="Name, IP, Steam UID, GUID, reason" /></div></div>
+              <div class="activity-field"><label for="player-outcome-filter">Outcome</label><select id="player-outcome-filter" class="form-select form-select-sm"><option value="">All outcomes</option><option value="successful">Successful</option><option value="rejected">Rejected</option><option value="removed">Removed</option><option value="pending">Pending</option><option value="unknown">Unknown</option></select></div>
+              <div class="activity-field"><label for="player-reason-filter">Reason</label><select id="player-reason-filter" class="form-select form-select-sm"><option value="">All reasons</option><option value="missing_addon">Missing addon</option><option value="unsigned_data">Unsigned data</option><option value="battleye">BattlEye</option><option value="steam_check">Steam check</option><option value="network_timeout">Network timeout</option><option value="manual_kick">Manual kick</option><option value="banned">Banned</option><option value="unknown">Unknown</option></select></div>
+              <button id="btn-refresh-player-activity" class="btn btn-sm btn-outline-secondary activity-refresh" title="Refresh"><i class="fa fa-rotate"></i></button>
+            </div>
+
+            <div class="activity-stats" aria-live="polite">
+              <div class="activity-stat stat-success"><span>Successful</span><strong id="player-stat-success">0</strong></div>
+              <div class="activity-stat stat-rejected"><span>Rejected</span><strong id="player-stat-rejected">0</strong></div>
+              <div class="activity-stat stat-removed"><span>Removed</span><strong id="player-stat-removed">0</strong></div>
+              <div class="activity-stat"><span>Unique players</span><strong id="player-stat-unique">0</strong></div>
+            </div>
+
+            <div class="table-responsive activity-table-wrap">
+              <table class="table table-sm align-middle activity-table mb-0">
+                <thead><tr><th>Time</th><th>Player</th><th>Identity</th><th>Outcome</th><th>Reason</th><th></th></tr></thead>
+                <tbody id="player-activity-body"><tr><td colspan="6" class="text-muted">Select a session to inspect player activity.</td></tr></tbody>
+              </table>
+            </div>
+            <button id="btn-load-more-players" class="btn btn-sm btn-outline-secondary d-none mt-3">Load more</button>
+          </div>
+        </section>
+
+        <section class="log-workspace-panel d-none" data-log-panel-content="sessions">
+          <div class="card-panel">
+            <div class="panel-header d-flex justify-content-between align-items-center"><span><i class="fa fa-clock-rotate-left me-2"></i>Server run history</span><button id="btn-refresh-log-sessions" class="btn btn-sm btn-outline-secondary"><i class="fa fa-rotate"></i></button></div>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle activity-table mb-0">
+                <thead><tr><th>Started</th><th>Duration</th><th>Status</th><th>Players</th><th>Successful</th><th>Rejected</th><th>Removed</th><th></th></tr></thead>
+                <tbody id="log-sessions-body"><tr><td colspan="8" class="text-muted">Loading sessions…</td></tr></tbody>
+              </table>
+            </div>
+            <button id="btn-load-more-sessions" class="btn btn-sm btn-outline-secondary d-none mt-3">Load more</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="modal fade" id="player-detail-modal" tabindex="-1" aria-labelledby="player-detail-title" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content player-detail-modal"><div class="modal-header"><div><div class="log-workspace-kicker">CONNECTION EVIDENCE</div><h5 id="player-detail-title" class="modal-title">Player activity</h5></div><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div id="player-detail-body" class="modal-body"></div></div></div>
       </div>
 
       <!-- ── RCON ───────────────────────────────────────────────── -->
