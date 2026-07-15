@@ -884,9 +884,10 @@ public static class ApiEndpoints
                 var lowercased = ModFileRepair.MakeLowercase(mods);
                 if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
                 await ServerCfgWriter.ApplyAsync(startup);
-                await BattlEyeConfigWriter.ApplyAsync(paths, cfg);
+                await BattlEyeConfigWriter.ApplyAsync(startup, cfg);
                 var instrumentation = await ServerCfgInstrumentation.ApplyAsync(startup.ServerCfg);
                 activity.ReportInstrumentation(instrumentation);
+                activity.ConfigureForRun(!startup.DisableBattleEye);
                 if (!instrumentation.Complete)
                     runtime.Push("stderr", $"Player tracking is partial: {string.Join("; ", instrumentation.Errors)}");
                 runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir, startup.ProfilesDir);

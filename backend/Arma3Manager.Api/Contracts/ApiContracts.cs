@@ -94,4 +94,6 @@ public sealed record PlayerTrackingState(
     string[] Sources,
     DateTimeOffset? LastEventAt,
     string? LastError,
-    long DroppedCandidates = 0);
+    long DroppedCandidates = 0,
+    string Profile = "log_identity",
+    string[]? AvailableFields = null);

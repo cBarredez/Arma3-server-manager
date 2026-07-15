@@ -31,6 +31,7 @@ public sealed class PlayerActivityService : BackgroundService
     DateTimeOffset? lastEventAt;
     string? lastError;
     long dropped;
+    volatile bool battleEyeEnabled;
 
     public PlayerActivityService(ILogger<PlayerActivityService> logger, AppConfig config, RuntimeState runtime, LogHub logHub, BattlEyeRconClient rcon, SqliteStore store)
     {
@@ -52,9 +53,28 @@ public sealed class PlayerActivityService : BackgroundService
         {
             lock (stateGate)
             {
-                var full = instrumentationComplete && rcon.IsConfigured && rcon.IsConnected && dropped == 0;
-                return new(full ? "full" : "partial", sources.Order().ToArray(), lastEventAt, hookError ?? lastError, dropped);
+                var full = instrumentationComplete && dropped == 0 &&
+                    (!battleEyeEnabled || (rcon.IsConfigured && rcon.IsConnected));
+                var profile = battleEyeEnabled ? "battleye_enriched" : "log_identity";
+                string[] availableFields = battleEyeEnabled
+                    ? ["name", "steamUid", "networkId", "ip", "battlEyeGuid", "rconPlayerId", "outcome"]
+                    : ["name", "steamUid", "networkId", "outcome"];
+                return new(full ? "full" : "partial", sources.Order().ToArray(), lastEventAt, hookError ?? lastError,
+                    dropped, profile, availableFields);
             }
+        }
+    }
+
+    public void ConfigureForRun(bool enableBattleEye)
+    {
+        battleEyeEnabled = enableBattleEye;
+        lock (roster) roster.Clear();
+        lock (stateGate)
+        {
+            sources.Clear();
+            sources.Add("server_hooks");
+            sources.Add("rpt");
+            if (!enableBattleEye && lastError?.Contains("RCon", StringComparison.OrdinalIgnoreCase) == true) lastError = null;
         }
     }
 
@@ -121,7 +141,7 @@ public sealed class PlayerActivityService : BackgroundService
                 case ServerRunEnded ended:
                     await FlushSignalsAsync(signals);
                     await store.EndServerSessionAsync(ended);
-                    roster.Clear();
+                    lock (roster) roster.Clear();
                     break;
                 case LogEntry entry when PlayerSignalParser.TryParse(entry, out var signal):
                     signals.Add(signal!);
@@ -158,9 +178,19 @@ public sealed class PlayerActivityService : BackgroundService
             if (!runtime.IsRunning || runtime.RunId is null)
             {
                 failures = 0;
-                roster.Clear();
+                lock (roster) roster.Clear();
                 if (rcon.IsConnected) await rcon.DisconnectAsync();
                 await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                continue;
+            }
+            if (!battleEyeEnabled)
+            {
+                failures = 0;
+                lock (roster) roster.Clear();
+                if (rcon.IsConnected) await rcon.DisconnectAsync();
+                lock (stateGate)
+                    if (lastError?.Contains("RCon", StringComparison.OrdinalIgnoreCase) == true) lastError = null;
+                await Task.Delay(TimeSpan.FromSeconds(5), ct);
                 continue;
             }
             if (!rcon.IsConfigured)
@@ -194,27 +224,30 @@ public sealed class PlayerActivityService : BackgroundService
 
     void ReconcileRoster(string runId, IReadOnlyList<RconPlayer> players)
     {
-        var current = players.ToDictionary(PlayerKey, StringComparer.OrdinalIgnoreCase);
-        foreach (var (key, player) in current)
+        lock (roster)
         {
-            if (roster.ContainsKey(key)) continue;
-            var at = DateTimeOffset.UtcNow;
-            var raw = $"RCon player verified: #{player.Id} {player.Name} {player.Ip} {player.Guid}";
-            Enqueue(new PlayerSignal(runId, at, "rcon_seen", "rcon_roster", "authoritative", raw,
-                PlayerSignalParser.Fingerprint(runId, "rcon_seen", player.Guid, player.Ip, player.Name, raw, at),
-                BattlEyeGuid: NullGuid(player.Guid), RconPlayerId: player.Id, Name: player.Name, Ip: player.Ip, Admitted: true));
+            var current = players.ToDictionary(PlayerKey, StringComparer.OrdinalIgnoreCase);
+            foreach (var (key, player) in current)
+            {
+                if (roster.ContainsKey(key)) continue;
+                var at = DateTimeOffset.UtcNow;
+                var raw = $"RCon player verified: #{player.Id} {player.Name} {player.Ip} {player.Guid}";
+                Enqueue(new PlayerSignal(runId, at, "rcon_seen", "rcon_roster", "authoritative", raw,
+                    PlayerSignalParser.Fingerprint(runId, "rcon_seen", player.Guid, player.Ip, player.Name, raw, at),
+                    BattlEyeGuid: NullGuid(player.Guid), RconPlayerId: player.Id, Name: player.Name, Ip: player.Ip, Admitted: true));
+            }
+            foreach (var (key, player) in roster)
+            {
+                if (current.ContainsKey(key)) continue;
+                var at = DateTimeOffset.UtcNow;
+                var raw = $"RCon player left roster: #{player.Id} {player.Name} {player.Ip} {player.Guid}";
+                Enqueue(new PlayerSignal(runId, at, "disconnected", "rcon_roster", "authoritative", raw,
+                    PlayerSignalParser.Fingerprint(runId, "disconnected", player.Guid, player.Ip, player.Name, raw, at),
+                    BattlEyeGuid: NullGuid(player.Guid), RconPlayerId: player.Id, Name: player.Name, Ip: player.Ip, Terminal: true));
+            }
+            roster.Clear();
+            foreach (var pair in current) roster[pair.Key] = pair.Value;
         }
-        foreach (var (key, player) in roster)
-        {
-            if (current.ContainsKey(key)) continue;
-            var at = DateTimeOffset.UtcNow;
-            var raw = $"RCon player left roster: #{player.Id} {player.Name} {player.Ip} {player.Guid}";
-            Enqueue(new PlayerSignal(runId, at, "disconnected", "rcon_roster", "authoritative", raw,
-                PlayerSignalParser.Fingerprint(runId, "disconnected", player.Guid, player.Ip, player.Name, raw, at),
-                BattlEyeGuid: NullGuid(player.Guid), RconPlayerId: player.Id, Name: player.Name, Ip: player.Ip, Terminal: true));
-        }
-        roster.Clear();
-        foreach (var pair in current) roster[pair.Key] = pair.Value;
     }
 
     void OnLogEntry(LogEntry entry)
@@ -279,11 +312,11 @@ public sealed class PlayerActivityService : BackgroundService
 
 public static class PlayerSignalParser
 {
-    static readonly Regex Marker = new(@"^A3MGR_PLAYER_V(?<version>[12])\|(?<event>[A-Z_]+)\|(?<payload>\[.*\])$", RegexOptions.Compiled);
+    static readonly Regex Marker = new(@"^A3MGR_PLAYER_V(?<version>[123])\|(?<event>[A-Z_]+)\|(?<payload>\[.*\])$", RegexOptions.Compiled);
     static readonly Regex LogTimestamp = new(@"^\s*(?:(?:\d{4}/\d{1,2}/\d{1,2},\s*)?(?:\d{1,2}:){2}\d{2})\s+", RegexOptions.Compiled);
     static readonly Regex RconConnected = new(@"Player\s+#?(?<id>\d+)?\s*(?<name>.*?)\s*\((?<guid>[0-9a-f]{16,})\).*?connected", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     static readonly Regex RconKicked = new(@"Player\s+#?(?<id>\d+)?\s*(?<name>.*?)\s*\((?<guid>[0-9a-f]{16,})\).*?(?:kicked|banned)(?:.*?:\s*(?<reason>.*))?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    static readonly Regex NaturalConnection = new(@"\bPlayer\s+(?<name>[^\r\n]+?)\s+(?<event>connected|disconnected)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static readonly Regex NaturalConnection = new(@"\bPlayer\s+(?<name>[^\r\n]+?)\s+(?<event>connected|disconnected)(?:\s*\(id=(?<identity>\d+)\))?\.?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     static readonly string[] CandidateTerms = ["A3MGR_PLAYER_V", "player", "battleye", "steam check", "signature", "unsigned", "missing addon", "wrong password", "session locked", "kicked", "banned", "disconnected"];
 
     public static bool IsCandidate(string text) => CandidateTerms.Any(term => text.Contains(term, StringComparison.OrdinalIgnoreCase));
@@ -322,7 +355,11 @@ public static class PlayerSignalParser
         if (natural.Success)
         {
             var kind = natural.Groups["event"].Value.Equals("connected", StringComparison.OrdinalIgnoreCase) ? "connected" : "disconnected";
-            signal = Build(entry, kind, name: natural.Groups["name"].Value.Trim(), admitted: kind == "connected", terminal: kind == "disconnected", confidence: "inferred");
+            var identity = EmptyToNull(natural.Groups["identity"].Value);
+            var steamUid = IsSteamUid(identity) ? identity : null;
+            var networkId = steamUid is null ? identity : null;
+            signal = Build(entry, kind, networkId: networkId, steamUid: steamUid, name: natural.Groups["name"].Value.Trim(),
+                admitted: kind == "connected", terminal: kind == "disconnected", confidence: "authoritative");
             return true;
         }
         var reasonCode = ClassifyStandaloneRejection(entry.Data);
@@ -352,8 +389,9 @@ public static class PlayerSignalParser
     {
         var values = ParseValues(payload);
         if (values is null || !ExpectedShape(version, eventName, values.Count)) return null;
-        var networkId = values.ElementAtOrDefault(0);
-        if (!IsNetworkId(networkId)) return null;
+        var identity = values.ElementAtOrDefault(0);
+        if (!IsNetworkId(identity)) return null;
+        var networkId = IsSteamUid(identity) ? null : identity;
         var kind = eventName switch
         {
             "CONNECTED" => "connected",
@@ -366,7 +404,7 @@ public static class PlayerSignalParser
             _ => "unknown"
         };
         if (kind == "unknown") return null;
-        string? steamUid = null;
+        string? steamUid = IsSteamUid(identity) ? identity : null;
         string? name = null;
         if (eventName == "CONNECTED" && values.Count == 2)
         {
@@ -374,7 +412,7 @@ public static class PlayerSignalParser
             if (userInfo is null || (userInfo.Count != 0 && userInfo.Count < 8)) return null;
             if (userInfo.Count >= 8)
             {
-                steamUid = EmptyToNull(userInfo[2]);
+                steamUid = EmptyToNull(userInfo[2]) ?? steamUid;
                 name = EmptyToNull(userInfo[3]);
                 if (ParseBool(userInfo[7]) || steamUid?.StartsWith("HC", StringComparison.OrdinalIgnoreCase) == true) return null;
             }
@@ -450,6 +488,7 @@ public static class PlayerSignalParser
     };
 
     static bool IsNetworkId(string? value) => !string.IsNullOrWhiteSpace(value) && value.All(char.IsAsciiDigit);
+    static bool IsSteamUid(string? value) => value is { Length: 17 } && value.All(char.IsAsciiDigit) && ulong.TryParse(value, out _);
 
     static string? ClassifyStandaloneRejection(string text)
     {

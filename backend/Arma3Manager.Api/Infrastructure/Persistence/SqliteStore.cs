@@ -81,6 +81,7 @@ public sealed class SqliteStore(string dbPath)
         await command.ExecuteNonQueryAsync();
         await ApplyPlayerTrackingV2MigrationAsync(connection);
         await ApplyHeadlessClientHistoryMigrationAsync(connection);
+        await ApplyNaturalPlayerIdentityMigrationAsync(connection);
     }
 
     static async Task ApplyPlayerTrackingV2MigrationAsync(SqliteConnection connection)
@@ -136,6 +137,53 @@ public sealed class SqliteStore(string dbPath)
         """;
         cleanup.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         await cleanup.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
+    static async Task ApplyNaturalPlayerIdentityMigrationAsync(SqliteConnection connection)
+    {
+        var applied = connection.CreateCommand();
+        applied.CommandText = "select 1 from schema_migrations where version=4 limit 1";
+        if (await applied.ExecuteScalarAsync() is not null) return;
+
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+        var select = connection.CreateCommand();
+        select.Transaction = transaction;
+        select.CommandText = """
+        select e.connection_id,e.raw_text,e.run_id,e.occurred_at,e.source
+        from player_events e join player_connections p on p.id=e.connection_id
+        where e.connection_id is not null and p.steam_uid is null
+          and lower(e.raw_text) like '%player %'
+          and (lower(e.raw_text) like '% connected (id=%' or lower(e.raw_text) like '% disconnected (id=%')
+        """;
+        var repairs = new List<(long ConnectionId, string SteamUid, string Name)>();
+        await using (var reader = await select.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                var at = DateTimeOffset.TryParse(reader.GetString(3), out var parsed) ? parsed : DateTimeOffset.UtcNow;
+                var entry = new LogEntry("migration", reader.GetString(1), at, Source: reader.GetString(4), RunId: reader.GetString(2));
+                if (PlayerSignalParser.TryParse(entry, out var signal) && signal?.SteamUid is { } steamUid && signal.Name is { } name)
+                    repairs.Add((reader.GetInt64(0), steamUid, name));
+            }
+        }
+
+        foreach (var repair in repairs)
+        {
+            var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = "update player_connections set steam_uid=coalesce(steam_uid,$steam),name=coalesce(name,$name) where id=$id";
+            update.Parameters.AddWithValue("$steam", repair.SteamUid);
+            update.Parameters.AddWithValue("$name", repair.Name);
+            update.Parameters.AddWithValue("$id", repair.ConnectionId);
+            await update.ExecuteNonQueryAsync();
+        }
+
+        var mark = connection.CreateCommand();
+        mark.Transaction = transaction;
+        mark.CommandText = "insert into schema_migrations(version,applied_at) values(4,$now)";
+        mark.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        await mark.ExecuteNonQueryAsync();
         await transaction.CommitAsync();
     }
 
