@@ -8,6 +8,8 @@ import {
   LogConnectionGate,
   advanceLogCursor,
   countMissingLogEntries,
+  headlessClientLabel,
+  headlessClientSummary,
   isNearLogBottom,
   shouldStreamLogs,
   virtualLogRange,
@@ -235,6 +237,7 @@ function showApp() {
   initNav();
   initServerControls();
   initRconControls();
+  startHeadlessStatusPolling();
   const route = routeFromHash();
   const requestedView = route.view || localStorage.getItem('a3mgr.view') || 'dashboard';
   loadView(VIEWS.includes(requestedView) ? requestedView : 'dashboard', false, route.filePath || null);
@@ -1761,6 +1764,7 @@ async function loadStartupSettings() {
     const { settings, command: startupCommand } = await GET('/api/startup');
     fillStartupForm(settings);
     command.textContent = startupCommand;
+    await refreshHeadlessClientStatus();
   } catch (e) {
     command.textContent = 'Error loading startup settings: ' + e.message;
   }
@@ -1770,6 +1774,7 @@ async function loadStartupSettings() {
       const { settings, command: startupCommand } = await PUT('/api/startup', readStartupForm());
       fillStartupForm(settings);
       document.getElementById('startup-command').textContent = startupCommand;
+      await refreshHeadlessClientStatus();
       toast('Startup settings saved');
     } catch (e) { toast(e.message, 'error'); }
   };
@@ -1784,6 +1789,7 @@ async function loadStartupSettings() {
   };
 
   document.getElementById('btn-refresh-missions').onclick = loadMissions;
+  document.getElementById('startup-headless').oninput = () => renderHeadlessClientStatus(latestHeadlessStatus);
   document.getElementById('btn-apply-mission').onclick = async () => {
     const select = document.getElementById('startup-mission');
     if (!select.value) return toast('Select a mission first', 'warning');
@@ -1795,6 +1801,38 @@ async function loadStartupSettings() {
   };
   await loadMissions();
 
+}
+
+let headlessStatusTimer = null;
+let latestHeadlessStatus = { running: false, headlessClientPids: [] };
+
+function startHeadlessStatusPolling() {
+  if (headlessStatusTimer) return;
+  headlessStatusTimer = window.setInterval(() => {
+    if (state.view === 'config') refreshHeadlessClientStatus();
+  }, 5_000);
+}
+
+async function refreshHeadlessClientStatus() {
+  try {
+    latestHeadlessStatus = await GET('/api/server/status');
+  } catch {
+    latestHeadlessStatus = { running: false, headlessClientPids: [] };
+  }
+  renderHeadlessClientStatus(latestHeadlessStatus);
+}
+
+function renderHeadlessClientStatus(status) {
+  const input = document.getElementById('startup-headless');
+  const warning = document.getElementById('startup-headless-warning');
+  const output = document.getElementById('startup-headless-status');
+  if (!input || !warning || !output) return;
+  const summary = headlessClientSummary(input.value, status?.headlessClientPids);
+  warning.classList.toggle('d-none', summary.desired === 0);
+  output.textContent = summary.desired === 0
+    ? 'HC disabled'
+    : status?.running ? summary.text : `HC configured: ${summary.desired} · starts with server`;
+  output.className = `hc-process-status ${summary.desired === 0 || !status?.running ? 'is-idle' : summary.active === summary.desired ? 'is-ready' : 'is-warning'}`;
 }
 
 async function loadMissions() {
@@ -2576,6 +2614,13 @@ function createLogLine(entry, includeTime = true) {
     time.className = 'log-time';
     time.textContent = `${new Date(entry.ts).toLocaleTimeString()} `;
     line.appendChild(time);
+  }
+  const hcLabel = headlessClientLabel(entry.source);
+  if (hcLabel) {
+    const source = document.createElement('span');
+    source.className = 'log-source-hc';
+    source.textContent = `[${hcLabel}]`;
+    line.append(source, document.createTextNode(' '));
   }
   const level = document.createElement('span');
   level.className = `log-level log-${severity}`;

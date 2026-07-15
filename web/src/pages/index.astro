@@ -436,8 +436,17 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
             <div class="col-12"><label class="form-label">Extra Startup Parameters</label><input id="startup-extra" class="form-control" /></div>
             <div class="col-md-6"><label class="form-label">Server-Side Only Mods</label><input id="startup-server-mods" class="form-control" placeholder="@servermod;@another;" /></div>
             <div class="col-md-6"><label class="form-label">Optional Client-Side Mods</label><input id="startup-optional-mods" class="form-control" placeholder="@optional1;@optional2;" /></div>
-            <div class="col-md-6"><label class="form-label">Extra Ports</label><input id="startup-extra-ports" class="form-control" placeholder="2303,2304,2305,2306" /></div>
-            <div class="col-md-3"><label class="form-label">Headless Clients</label><input id="startup-headless" class="form-control" type="number" min="0" max="5" /></div>
+            <div class="col-md-4"><label class="form-label">Extra Ports</label><input id="startup-extra-ports" class="form-control" placeholder="2303,2304,2305,2306" /></div>
+            <div class="col-md-5 hc-setting">
+              <label class="form-label" for="startup-headless">Headless Clients <span class="hc-advanced-tag">Advanced</span></label>
+              <input id="startup-headless" class="form-control" type="number" min="0" max="5" value="0" aria-describedby="startup-headless-help startup-headless-warning startup-headless-status" />
+              <div id="startup-headless-help" class="hc-help">0 disables HC. Requires a prepared mission; each HC occupies one player slot.</div>
+              <div id="startup-headless-warning" class="hc-readiness-warning d-none" role="status">
+                <i class="fa fa-triangle-exclamation" aria-hidden="true"></i>
+                The manager starts the processes, but the mission must provide HC slots and AI-transfer scripts.
+              </div>
+              <div id="startup-headless-status" class="hc-process-status is-idle" aria-live="polite">HC disabled</div>
+            </div>
             <div class="col-md-3"><label class="form-label">SteamCMD Flags</label><input id="startup-steam-flags" class="form-control" /></div>
             <div class="col-12 d-flex flex-wrap gap-3">
               <label class="form-check form-switch"><input id="startup-auto-update" class="form-check-input" type="checkbox" /> <span class="form-check-label">Automatic Updates</span></label>

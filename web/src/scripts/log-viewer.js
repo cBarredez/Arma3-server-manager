@@ -153,3 +153,14 @@ export function countMissingLogEntries(gap) {
   const oldest = Number(gap?.oldestAvailableId) || 0;
   return requested > 0 && oldest > requested + 1 ? oldest - requested - 1 : 0;
 }
+
+export function headlessClientLabel(source) {
+  const match = /^headless-client-(\d+)$/i.exec(String(source || ''));
+  return match ? `HC${match[1]}` : null;
+}
+
+export function headlessClientSummary(configured, pids) {
+  const desired = Math.max(0, Math.min(5, Number.parseInt(configured, 10) || 0));
+  const active = new Set((Array.isArray(pids) ? pids : []).map(Number).filter(pid => Number.isInteger(pid) && pid > 0)).size;
+  return { desired, active, text: `HC processes active: ${active}/${desired}` };
+}
