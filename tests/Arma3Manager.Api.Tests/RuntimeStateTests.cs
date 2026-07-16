@@ -8,6 +8,21 @@ namespace Arma3Manager.Api.Tests;
 public sealed class RuntimeStateTests
 {
     [Fact]
+    public async Task ASecondMainProcessCannotReplaceTheManagedProcess()
+    {
+        var runtime = new RuntimeState();
+        var first = runtime.Start("/bin/sleep", ["30"], Path.GetTempPath());
+        try
+        {
+            var error = Assert.Throws<InvalidOperationException>(() => runtime.Start("/bin/sleep", ["30"], Path.GetTempPath()));
+
+            Assert.Contains(first.Pid.ToString(), error.Message);
+            Assert.Equal(first.Pid, runtime.ProcessId);
+        }
+        finally { await runtime.StopAsync(); }
+    }
+
+    [Fact]
     public void BoundedLogKeepsStableIncreasingIdsAfterRollover()
     {
         var runtime = new RuntimeState();
