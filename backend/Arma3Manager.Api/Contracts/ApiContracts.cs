@@ -34,8 +34,38 @@ public sealed record SteamInputRequest(string Input);
 public sealed record AccountUpdateRequest(string Username, string CurrentPassword, string NewPassword);
 public sealed record FactoryResetRequest(string CurrentPassword, string Confirmation);
 public sealed record RestartAppRequest(string CurrentPassword);
-public sealed record MetricsSample(string RunId, DateTimeOffset SampledAt, double? CpuPercent, double CoresCapacity, long MemoryUsedBytes, double MemoryPercent);
-public sealed record MetricsSessionSummary(string RunId, DateTimeOffset StartedAt, DateTimeOffset? EndedAt, int SampleCount, double? AvgCpuPercent, double? PeakCpuPercent, double CoresCapacity, double? AvgMemoryPercent, double? PeakMemoryPercent);
+public sealed record MetricsSample(
+    string RunId,
+    DateTimeOffset SampledAt,
+    double? CpuPercent,
+    double CoresCapacity,
+    long MemoryUsedBytes,
+    double MemoryPercent,
+    double? CpuUsagePercent = null,
+    int? ActivePlayers = null,
+    int? ActiveHeadlessClients = null)
+{
+    public double? CpuCoresUsed => CpuUsagePercent / 100d;
+}
+
+public sealed record MetricsSessionSummary(
+    string RunId,
+    DateTimeOffset StartedAt,
+    DateTimeOffset? EndedAt,
+    int SampleCount,
+    double? AvgCpuPercent,
+    double? PeakCpuPercent,
+    double CoresCapacity,
+    double? AvgMemoryPercent,
+    double? PeakMemoryPercent,
+    double? AvgCpuUsagePercent = null,
+    double? PeakCpuUsagePercent = null,
+    double? AvgCpuCoresUsed = null,
+    double? PeakCpuCoresUsed = null,
+    int? PeakActivePlayers = null,
+    int? PeakActiveHeadlessClients = null);
+
+public sealed record MetricsSessionDetail(MetricsSessionSummary Session, IReadOnlyList<MetricsSample> Samples);
 public sealed record ServerLifecycleStatus(
     string Phase,
     bool Running,
@@ -66,7 +96,16 @@ public sealed record ServerSessionSummary(
     int Rejected,
     int Removed,
     int Pending,
-    int UniquePlayers);
+    int UniquePlayers,
+    int SampleCount = 0,
+    double? AvgCpuUsagePercent = null,
+    double? PeakCpuUsagePercent = null,
+    double? AvgCpuCoresUsed = null,
+    double? PeakCpuCoresUsed = null,
+    double? AvgMemoryPercent = null,
+    double? PeakMemoryPercent = null,
+    int? PeakActivePlayers = null,
+    int? PeakActiveHeadlessClients = null);
 
 public sealed record PlayerConnectionRecord(
     long Id,

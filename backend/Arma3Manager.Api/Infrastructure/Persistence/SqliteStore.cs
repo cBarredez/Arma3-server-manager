@@ -110,6 +110,7 @@ public sealed class SqliteStore(string dbPath)
         await ApplyPlayerTrackingV2MigrationAsync(connection);
         await ApplyHeadlessClientHistoryMigrationAsync(connection);
         await ApplyNaturalPlayerIdentityMigrationAsync(connection);
+        await ApplyMetricsCorrelationMigrationAsync(connection);
     }
 
     public async Task<PersistedServerRuntime> GetServerRuntimeAsync()
@@ -316,6 +317,29 @@ public sealed class SqliteStore(string dbPath)
         await transaction.CommitAsync();
     }
 
+    static async Task ApplyMetricsCorrelationMigrationAsync(SqliteConnection connection)
+    {
+        var applied = connection.CreateCommand();
+        applied.CommandText = "select 1 from schema_migrations where version=5 limit 1";
+        if (await applied.ExecuteScalarAsync() is not null) return;
+
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+        var migrate = connection.CreateCommand();
+        migrate.Transaction = transaction;
+        migrate.CommandText = """
+        alter table metrics_samples add column cpu_usage_percent real null;
+        alter table metrics_samples add column active_players integer null;
+        alter table metrics_samples add column active_headless_clients integer null;
+        update metrics_samples
+        set cpu_usage_percent=round(cpu_percent * cores_capacity, 1)
+        where cpu_usage_percent is null and cpu_percent is not null;
+        insert into schema_migrations(version,applied_at) values(5,$now);
+        """;
+        migrate.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        await migrate.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
     // Records one CPU/RAM sample for the currently running game session (identified by RuntimeState.RunId),
     // so "how much CPU/RAM did this match use" can be reconstructed and exported after the fact instead of
     // only being visible live on the dashboard while the match is running.
@@ -323,13 +347,21 @@ public sealed class SqliteStore(string dbPath)
     {
         await using var connection = Open();
         var command = connection.CreateCommand();
-        command.CommandText = "insert into metrics_samples(run_id, sampled_at, cpu_percent, cores_capacity, memory_used_bytes, memory_percent) values ($runId,$sampledAt,$cpu,$cores,$memBytes,$memPercent)";
+        command.CommandText = """
+        insert into metrics_samples(
+            run_id,sampled_at,cpu_percent,cores_capacity,memory_used_bytes,memory_percent,
+            cpu_usage_percent,active_players,active_headless_clients)
+        values($runId,$sampledAt,$cpu,$cores,$memBytes,$memPercent,$cpuUsage,$players,$headless)
+        """;
         command.Parameters.AddWithValue("$runId", sample.RunId);
         command.Parameters.AddWithValue("$sampledAt", sample.SampledAt.ToString("O"));
         command.Parameters.AddWithValue("$cpu", (object?)sample.CpuPercent ?? DBNull.Value);
         command.Parameters.AddWithValue("$cores", sample.CoresCapacity);
         command.Parameters.AddWithValue("$memBytes", sample.MemoryUsedBytes);
         command.Parameters.AddWithValue("$memPercent", sample.MemoryPercent);
+        command.Parameters.AddWithValue("$cpuUsage", (object?)sample.CpuUsagePercent ?? DBNull.Value);
+        command.Parameters.AddWithValue("$players", (object?)sample.ActivePlayers ?? DBNull.Value);
+        command.Parameters.AddWithValue("$headless", (object?)sample.ActiveHeadlessClients ?? DBNull.Value);
         await command.ExecuteNonQueryAsync();
     }
 
@@ -338,10 +370,14 @@ public sealed class SqliteStore(string dbPath)
         await using var connection = Open();
         var command = connection.CreateCommand();
         command.CommandText = """
-        select run_id, min(sampled_at), max(sampled_at), count(*), avg(cpu_percent), max(cpu_percent), max(cores_capacity), avg(memory_percent), max(memory_percent)
-        from metrics_samples
-        group by run_id
-        order by min(sampled_at) desc
+        select m.run_id,coalesce(s.started_at,min(m.sampled_at)),
+          case when s.ended_at is null and s.end_reason='running' then null else coalesce(s.ended_at,max(m.sampled_at)) end,
+          count(*),avg(m.cpu_percent),max(m.cpu_percent),max(m.cores_capacity),avg(m.memory_percent),max(m.memory_percent),
+          avg(m.cpu_usage_percent),max(m.cpu_usage_percent),avg(m.cpu_usage_percent / 100.0),max(m.cpu_usage_percent / 100.0),
+          max(m.active_players),max(m.active_headless_clients)
+        from metrics_samples m left join server_sessions s on s.run_id=m.run_id
+        group by m.run_id
+        order by coalesce(s.started_at,min(m.sampled_at)) desc
         limit $limit
         """;
         command.Parameters.AddWithValue("$limit", limit);
@@ -351,15 +387,20 @@ public sealed class SqliteStore(string dbPath)
         {
             var runId = reader.GetString(0);
             var startedAt = DateTimeOffset.Parse(reader.GetString(1));
-            var lastSampleAt = DateTimeOffset.Parse(reader.GetString(2));
-            var ongoing = runId == currentRunId;
+            var ongoing = runId == currentRunId && reader.IsDBNull(2);
             results.Add(new(
-                runId, startedAt, ongoing ? null : lastSampleAt, reader.GetInt32(3),
+                runId, startedAt, ongoing ? null : (reader.IsDBNull(2) ? null : DateTimeOffset.Parse(reader.GetString(2))), reader.GetInt32(3),
                 reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? null : reader.GetDouble(5),
                 reader.GetDouble(6),
                 reader.IsDBNull(7) ? null : reader.GetDouble(7),
-                reader.IsDBNull(8) ? null : reader.GetDouble(8)));
+                reader.IsDBNull(8) ? null : reader.GetDouble(8),
+                reader.IsDBNull(9) ? null : reader.GetDouble(9),
+                reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                reader.IsDBNull(11) ? null : reader.GetDouble(11),
+                reader.IsDBNull(12) ? null : reader.GetDouble(12),
+                reader.IsDBNull(13) ? null : reader.GetInt32(13),
+                reader.IsDBNull(14) ? null : reader.GetInt32(14)));
         }
         return results;
     }
@@ -368,7 +409,11 @@ public sealed class SqliteStore(string dbPath)
     {
         await using var connection = Open();
         var command = connection.CreateCommand();
-        command.CommandText = "select run_id, sampled_at, cpu_percent, cores_capacity, memory_used_bytes, memory_percent from metrics_samples where run_id = $runId order by sampled_at";
+        command.CommandText = """
+        select run_id,sampled_at,cpu_percent,cores_capacity,memory_used_bytes,memory_percent,
+               cpu_usage_percent,active_players,active_headless_clients
+        from metrics_samples where run_id=$runId order by sampled_at
+        """;
         command.Parameters.AddWithValue("$runId", runId);
         await using var reader = await command.ExecuteReaderAsync();
         var results = new List<MetricsSample>();
@@ -377,9 +422,37 @@ public sealed class SqliteStore(string dbPath)
             results.Add(new(
                 reader.GetString(0), DateTimeOffset.Parse(reader.GetString(1)),
                 reader.IsDBNull(2) ? null : reader.GetDouble(2),
-                reader.GetDouble(3), reader.GetInt64(4), reader.GetDouble(5)));
+                reader.GetDouble(3), reader.GetInt64(4), reader.GetDouble(5),
+                reader.IsDBNull(6) ? null : reader.GetDouble(6),
+                reader.IsDBNull(7) ? null : reader.GetInt32(7),
+                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
         }
         return results;
+    }
+
+    public async Task<MetricsSessionDetail?> GetMetricsSessionDetailAsync(string runId)
+    {
+        var session = await GetServerSessionAsync(runId);
+        if (session is null) return null;
+        var samples = await GetMetricsSamplesAsync(runId);
+        var legacyCpu = samples.Where(sample => sample.CpuPercent.HasValue).Select(sample => sample.CpuPercent!.Value).ToArray();
+        var usageCpu = samples.Where(sample => sample.CpuUsagePercent.HasValue).Select(sample => sample.CpuUsagePercent!.Value).ToArray();
+        var memory = samples.Select(sample => sample.MemoryPercent).ToArray();
+        var capacity = samples.Count == 0 ? 0 : samples.Max(sample => sample.CoresCapacity);
+        var summary = new MetricsSessionSummary(
+            session.RunId, session.StartedAt, session.EndedAt, samples.Count,
+            legacyCpu.Length == 0 ? null : legacyCpu.Average(),
+            legacyCpu.Length == 0 ? null : legacyCpu.Max(),
+            capacity,
+            memory.Length == 0 ? null : memory.Average(),
+            memory.Length == 0 ? null : memory.Max(),
+            usageCpu.Length == 0 ? null : usageCpu.Average(),
+            usageCpu.Length == 0 ? null : usageCpu.Max(),
+            usageCpu.Length == 0 ? null : usageCpu.Average() / 100d,
+            usageCpu.Length == 0 ? null : usageCpu.Max() / 100d,
+            samples.Where(sample => sample.ActivePlayers.HasValue).Select(sample => sample.ActivePlayers).Max(),
+            samples.Where(sample => sample.ActiveHeadlessClients.HasValue).Select(sample => sample.ActiveHeadlessClients).Max());
+        return new(summary, samples);
     }
 
     // Keeps the table from growing forever on a long-lived server — only the most recent sessions are kept
@@ -604,7 +677,14 @@ public sealed class SqliteStore(string dbPath)
         return candidates.Count == 1 ? candidates[0] : null;
     }
 
-    public async Task<PagedResult<ServerSessionSummary>> GetServerSessionsAsync(DateTimeOffset? from, DateTimeOffset? to, string? status, string? cursor, int limit)
+    public async Task<PagedResult<ServerSessionSummary>> GetServerSessionsAsync(
+        DateTimeOffset? from,
+        DateTimeOffset? to,
+        string? status,
+        string? cursor,
+        int limit,
+        string? query = null,
+        string? sort = null)
     {
         limit = Math.Clamp(limit, 1, 100);
         var offset = int.TryParse(cursor, out var parsed) && parsed >= 0 ? parsed : 0;
@@ -615,21 +695,38 @@ public sealed class SqliteStore(string dbPath)
         if (to is not null) filters.Add("s.started_at <= $to");
         if (status == "running") filters.Add("s.ended_at is null");
         else if (status == "ended") filters.Add("s.ended_at is not null");
+        if (!string.IsNullOrWhiteSpace(query)) filters.Add("lower(s.run_id) like $query");
+        var direction = string.Equals(sort, "oldest", StringComparison.OrdinalIgnoreCase) ? "asc" : "desc";
         command.CommandText = $"""
+        with player_stats as (
+          select run_id,
+            sum(case when outcome='successful' then 1 else 0 end) successful,
+            sum(case when outcome='rejected' then 1 else 0 end) rejected,
+            sum(case when outcome='removed' then 1 else 0 end) removed,
+            sum(case when outcome='pending' then 1 else 0 end) pending,
+            count(distinct coalesce(steam_uid,battleye_guid,network_id,name,ip,cast(id as text))) unique_players
+          from player_connections group by run_id
+        ), metric_stats as (
+          select run_id,count(*) sample_count,avg(cpu_usage_percent) avg_cpu,max(cpu_usage_percent) peak_cpu,
+            avg(cpu_usage_percent / 100.0) avg_cores,max(cpu_usage_percent / 100.0) peak_cores,
+            avg(memory_percent) avg_memory,max(memory_percent) peak_memory,
+            max(active_players) peak_players,max(active_headless_clients) peak_headless
+          from metrics_samples group by run_id
+        )
         select s.run_id,s.started_at,s.ended_at,s.pid,s.exit_code,s.end_reason,
-          sum(case when p.outcome='successful' then 1 else 0 end),
-          sum(case when p.outcome='rejected' then 1 else 0 end),
-          sum(case when p.outcome='removed' then 1 else 0 end),
-          sum(case when p.outcome='pending' then 1 else 0 end),
-          count(distinct coalesce(p.steam_uid,p.battleye_guid,p.network_id,p.name,p.ip,cast(p.id as text)))
-        from server_sessions s left join player_connections p on p.run_id=s.run_id
+          coalesce(p.successful,0),coalesce(p.rejected,0),coalesce(p.removed,0),coalesce(p.pending,0),coalesce(p.unique_players,0),
+          coalesce(m.sample_count,0),m.avg_cpu,m.peak_cpu,m.avg_cores,m.peak_cores,m.avg_memory,m.peak_memory,m.peak_players,m.peak_headless
+        from server_sessions s
+        left join player_stats p on p.run_id=s.run_id
+        left join metric_stats m on m.run_id=s.run_id
         {(filters.Count == 0 ? "" : "where " + string.Join(" and ", filters))}
-        group by s.run_id order by s.started_at desc,s.run_id desc limit $take offset $offset
+        order by s.started_at {direction},s.run_id {direction} limit $take offset $offset
         """;
         command.Parameters.AddWithValue("$take", limit + 1);
         command.Parameters.AddWithValue("$offset", offset);
         if (from is not null) command.Parameters.AddWithValue("$from", from.Value.ToString("O"));
         if (to is not null) command.Parameters.AddWithValue("$to", to.Value.ToString("O"));
+        if (!string.IsNullOrWhiteSpace(query)) command.Parameters.AddWithValue("$query", query.Trim().ToLowerInvariant() + "%");
         var results = new List<ServerSessionSummary>();
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) results.Add(ReadServerSession(reader));
@@ -643,11 +740,28 @@ public sealed class SqliteStore(string dbPath)
         await using var connection = Open();
         var command = connection.CreateCommand();
         command.CommandText = """
+        with player_stats as (
+          select run_id,
+            sum(case when outcome='successful' then 1 else 0 end) successful,
+            sum(case when outcome='rejected' then 1 else 0 end) rejected,
+            sum(case when outcome='removed' then 1 else 0 end) removed,
+            sum(case when outcome='pending' then 1 else 0 end) pending,
+            count(distinct coalesce(steam_uid,battleye_guid,network_id,name,ip,cast(id as text))) unique_players
+          from player_connections where run_id=$run group by run_id
+        ), metric_stats as (
+          select run_id,count(*) sample_count,avg(cpu_usage_percent) avg_cpu,max(cpu_usage_percent) peak_cpu,
+            avg(cpu_usage_percent / 100.0) avg_cores,max(cpu_usage_percent / 100.0) peak_cores,
+            avg(memory_percent) avg_memory,max(memory_percent) peak_memory,
+            max(active_players) peak_players,max(active_headless_clients) peak_headless
+          from metrics_samples where run_id=$run group by run_id
+        )
         select s.run_id,s.started_at,s.ended_at,s.pid,s.exit_code,s.end_reason,
-          sum(case when p.outcome='successful' then 1 else 0 end),sum(case when p.outcome='rejected' then 1 else 0 end),
-          sum(case when p.outcome='removed' then 1 else 0 end),sum(case when p.outcome='pending' then 1 else 0 end),
-          count(distinct coalesce(p.steam_uid,p.battleye_guid,p.network_id,p.name,p.ip,cast(p.id as text)))
-        from server_sessions s left join player_connections p on p.run_id=s.run_id where s.run_id=$run group by s.run_id
+          coalesce(p.successful,0),coalesce(p.rejected,0),coalesce(p.removed,0),coalesce(p.pending,0),coalesce(p.unique_players,0),
+          coalesce(m.sample_count,0),m.avg_cpu,m.peak_cpu,m.avg_cores,m.peak_cores,m.avg_memory,m.peak_memory,m.peak_players,m.peak_headless
+        from server_sessions s
+        left join player_stats p on p.run_id=s.run_id
+        left join metric_stats m on m.run_id=s.run_id
+        where s.run_id=$run
         """;
         command.Parameters.AddWithValue("$run", runId);
         await using var reader = await command.ExecuteReaderAsync();
@@ -712,7 +826,16 @@ public sealed class SqliteStore(string dbPath)
     static ServerSessionSummary ReadServerSession(SqliteDataReader reader) => new(
         reader.GetString(0), DateTimeOffset.Parse(reader.GetString(1)), reader.IsDBNull(2) ? null : DateTimeOffset.Parse(reader.GetString(2)),
         reader.IsDBNull(3) ? null : reader.GetInt32(3), reader.IsDBNull(4) ? null : reader.GetInt32(4), reader.GetString(5),
-        reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetInt32(10));
+        reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetInt32(10),
+        reader.FieldCount > 11 && !reader.IsDBNull(11) ? reader.GetInt32(11) : 0,
+        reader.FieldCount > 12 && !reader.IsDBNull(12) ? reader.GetDouble(12) : null,
+        reader.FieldCount > 13 && !reader.IsDBNull(13) ? reader.GetDouble(13) : null,
+        reader.FieldCount > 14 && !reader.IsDBNull(14) ? reader.GetDouble(14) : null,
+        reader.FieldCount > 15 && !reader.IsDBNull(15) ? reader.GetDouble(15) : null,
+        reader.FieldCount > 16 && !reader.IsDBNull(16) ? reader.GetDouble(16) : null,
+        reader.FieldCount > 17 && !reader.IsDBNull(17) ? reader.GetDouble(17) : null,
+        reader.FieldCount > 18 && !reader.IsDBNull(18) ? reader.GetInt32(18) : null,
+        reader.FieldCount > 19 && !reader.IsDBNull(19) ? reader.GetInt32(19) : null);
 
     static PlayerConnectionRecord ReadPlayerConnection(SqliteDataReader reader) => new(
         reader.GetInt64(0), reader.GetString(1), DateTimeOffset.Parse(reader.GetString(2)),

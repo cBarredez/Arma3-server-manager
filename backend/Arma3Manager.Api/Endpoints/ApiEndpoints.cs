@@ -222,8 +222,8 @@ public static class ApiEndpoints
             catch (Exception exception) { return Results.Json(new { error = exception.Message }, statusCode: 502); }
         });
 
-        api.MapGet("/sessions", async (DateTimeOffset? from, DateTimeOffset? to, string? status, string? cursor, int? limit) =>
-            Results.Json(await store.GetServerSessionsAsync(from, to, status, cursor, limit ?? 25)));
+        api.MapGet("/sessions", async (DateTimeOffset? from, DateTimeOffset? to, string? status, string? q, string? sort, string? cursor, int? limit) =>
+            Results.Json(await store.GetServerSessionsAsync(from, to, status, cursor, limit ?? 25, q, sort)));
 
         api.MapGet("/sessions/{runId}", async (string runId) =>
         {
@@ -306,22 +306,20 @@ public static class ApiEndpoints
         api.MapGet("/metrics/sessions", async (RuntimeState runtime) =>
             Results.Json(await store.GetMetricsSessionsAsync(runtime.IsRunning ? runtime.RunId : null)));
 
+        api.MapGet("/metrics/sessions/{runId}", async (string runId) =>
+        {
+            var detail = await store.GetMetricsSessionDetailAsync(runId);
+            return detail is null
+                ? Results.Json(new { error = "Session not found" }, statusCode: 404)
+                : Results.Json(detail);
+        });
+
         api.MapGet("/metrics/sessions/{runId}/csv", async (string runId) =>
         {
             var samples = await store.GetMetricsSamplesAsync(runId);
             if (samples.Count == 0) return Results.Json(new { error = "No metrics recorded for that session" }, statusCode: 404);
 
-            var csv = new StringBuilder();
-            csv.AppendLine("timestamp_utc,cpu_percent,cores_capacity,memory_used_mb,memory_percent");
-            foreach (var sample in samples)
-            {
-                csv.Append(sample.SampledAt.UtcDateTime.ToString("O")).Append(',')
-                    .Append(sample.CpuPercent?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "").Append(',')
-                    .Append(sample.CoresCapacity.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(',')
-                    .Append((sample.MemoryUsedBytes / 1024d / 1024d).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(',')
-                    .Append(sample.MemoryPercent.ToString(System.Globalization.CultureInfo.InvariantCulture)).AppendLine();
-            }
-            var bytes = Encoding.UTF8.GetBytes(csv.ToString());
+            var bytes = Encoding.UTF8.GetBytes(MetricsCsv.Create(samples));
             return Results.File(bytes, "text/csv", $"session-{runId}.csv");
         });
 
