@@ -29,7 +29,12 @@ builder.Services.AddSingleton(paths);
 builder.Services.AddSingleton(store);
 builder.Services.AddSingleton<LogHub>();
 builder.Services.AddSingleton<RuntimeState>();
-builder.Services.AddSingleton<LogStreamService>();
+builder.Services.AddSingleton<ServerLifecycleCoordinator>();
+builder.Services.AddHostedService(services => services.GetRequiredService<ServerLifecycleCoordinator>());
+builder.Services.AddSingleton(services => new LogStreamService(
+    services.GetRequiredService<RuntimeState>(),
+    services.GetRequiredService<ServerLifecycleCoordinator>(),
+    services.GetRequiredService<ILogger<LogStreamService>>()));
 builder.Services.AddSingleton<SteamCmdSession>();
 builder.Services.AddSingleton<BattlEyeRconClient>();
 builder.Services.AddSingleton<PlayerActivityService>();
@@ -56,6 +61,7 @@ builder.Services.AddCors(options => options.AddPolicy("frontend", policy =>
 }));
 
 var app = builder.Build();
+await app.Services.GetRequiredService<ServerLifecycleCoordinator>().InitializeAsync();
 app.UseCors("frontend");
 app.UseSession();
 app.MapApiEndpoints(config, paths, store);

@@ -8,6 +8,20 @@ using Microsoft.Data.Sqlite;
 
 namespace Arma3Manager.Api.Infrastructure.Persistence;
 
+public sealed record PersistedServerRuntime(
+    string Phase,
+    string? Stage,
+    string? OperationId,
+    string? OwnerInstanceId,
+    string? RunId,
+    int? Pid,
+    long? ProcessStartedAtUtcTicks,
+    string? BinaryPath,
+    DateTimeOffset Since,
+    DateTimeOffset UpdatedAt,
+    string? LastError,
+    int[] ConflictingPids);
+
 /// <summary>SQLite persistence gateway for manager settings, mods, lists, and authentication metadata.</summary>
 public sealed class SqliteStore(string dbPath)
 {
@@ -44,6 +58,13 @@ public sealed class SqliteStore(string dbPath)
             exit_code integer null, end_reason text not null default 'running', created_at text not null
         );
         create index if not exists ix_server_sessions_started on server_sessions(started_at desc, run_id);
+        create table if not exists server_runtime (
+            singleton_id integer primary key check(singleton_id=1),
+            phase text not null, stage text null, operation_id text null, owner_instance_id text null,
+            run_id text null, pid integer null, process_started_ticks integer null, binary_path text null,
+            since text not null, updated_at text not null, last_error text null,
+            conflicting_pids_json text not null default '[]'
+        );
         create table if not exists player_connections (
             id integer primary key autoincrement, run_id text not null references server_sessions(run_id) on delete cascade,
             first_seen_at text not null, admitted_at text null, ended_at text null,
@@ -72,8 +93,15 @@ public sealed class SqliteStore(string dbPath)
         insert or ignore into server_sessions(run_id,started_at,ended_at,pid,exit_code,end_reason,created_at)
         select run_id,min(sampled_at),max(sampled_at),null,null,'legacy_inferred',min(sampled_at)
         from metrics_samples group by run_id;
-        update server_sessions set ended_at=$now,end_reason='interrupted'
-        where ended_at is null and end_reason='running';
+        update server_sessions set ended_at=$now,end_reason='superseded'
+        where ended_at is null and end_reason='running' and run_id not in (
+            select run_id from server_sessions where ended_at is null and end_reason='running'
+            order by started_at desc limit 1
+        );
+        create unique index if not exists ux_server_sessions_one_running
+        on server_sessions(end_reason) where ended_at is null and end_reason='running';
+        insert or ignore into server_runtime(singleton_id,phase,since,updated_at,conflicting_pids_json)
+        values(1,'stopped',$now,$now,'[]');
         insert or ignore into schema_migrations(version,applied_at) values(1,$now);
         """;
         command.Parameters.Clear();
@@ -83,6 +111,107 @@ public sealed class SqliteStore(string dbPath)
         await ApplyHeadlessClientHistoryMigrationAsync(connection);
         await ApplyNaturalPlayerIdentityMigrationAsync(connection);
     }
+
+    public async Task<PersistedServerRuntime> GetServerRuntimeAsync()
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "select phase,stage,operation_id,owner_instance_id,run_id,pid,process_started_ticks,binary_path,since,updated_at,last_error,conflicting_pids_json from server_runtime where singleton_id=1";
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) throw new InvalidOperationException("Server runtime row is missing");
+        return ReadServerRuntime(reader);
+    }
+
+    public async Task<(bool Accepted, PersistedServerRuntime State)> TryReserveServerStartAsync(string operationId, string ownerInstanceId, DateTimeOffset now)
+    {
+        await using var connection = Open();
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+        update server_runtime set phase='preparing',stage='validating',operation_id=$operation,owner_instance_id=$owner,
+            run_id=null,pid=null,process_started_ticks=null,binary_path=null,since=$now,updated_at=$now,last_error=null,conflicting_pids_json='[]'
+        where singleton_id=1 and phase in ('stopped','faulted');
+        """;
+        command.Parameters.AddWithValue("$operation", operationId);
+        command.Parameters.AddWithValue("$owner", ownerInstanceId);
+        command.Parameters.AddWithValue("$now", now.ToString("O"));
+        var accepted = await command.ExecuteNonQueryAsync() == 1;
+        var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = "select phase,stage,operation_id,owner_instance_id,run_id,pid,process_started_ticks,binary_path,since,updated_at,last_error,conflicting_pids_json from server_runtime where singleton_id=1";
+        await using var reader = await read.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        var state = ReadServerRuntime(reader);
+        await transaction.CommitAsync();
+        return (accepted, state);
+    }
+
+    public async Task<bool> UpdateServerRuntimeAsync(PersistedServerRuntime state, string? expectedOperationId = null)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        update server_runtime set phase=$phase,stage=$stage,operation_id=$operation,owner_instance_id=$owner,
+            run_id=$run,pid=$pid,process_started_ticks=$ticks,binary_path=$binary,since=$since,updated_at=$updated,
+            last_error=$error,conflicting_pids_json=$conflicts
+        where singleton_id=1
+        """ + (expectedOperationId is null ? "" : " and operation_id=$expected");
+        command.Parameters.AddWithValue("$phase", state.Phase);
+        command.Parameters.AddWithValue("$stage", (object?)state.Stage ?? DBNull.Value);
+        command.Parameters.AddWithValue("$operation", (object?)state.OperationId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$owner", (object?)state.OwnerInstanceId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$run", (object?)state.RunId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$pid", (object?)state.Pid ?? DBNull.Value);
+        command.Parameters.AddWithValue("$ticks", (object?)state.ProcessStartedAtUtcTicks ?? DBNull.Value);
+        command.Parameters.AddWithValue("$binary", (object?)state.BinaryPath ?? DBNull.Value);
+        command.Parameters.AddWithValue("$since", state.Since.ToString("O"));
+        command.Parameters.AddWithValue("$updated", state.UpdatedAt.ToString("O"));
+        command.Parameters.AddWithValue("$error", (object?)state.LastError ?? DBNull.Value);
+        command.Parameters.AddWithValue("$conflicts", JsonSerializer.Serialize(state.ConflictingPids, json));
+        if (expectedOperationId is not null) command.Parameters.AddWithValue("$expected", expectedOperationId);
+        return await command.ExecuteNonQueryAsync() == 1;
+    }
+
+    public async Task<ServerSessionSummary?> GetOpenServerSessionAsync()
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        select s.run_id,s.started_at,s.ended_at,s.pid,s.exit_code,s.end_reason,
+               0,0,0,0,0
+        from server_sessions s where s.ended_at is null and s.end_reason='running'
+        order by s.started_at desc limit 1
+        """;
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadServerSession(reader) : null;
+    }
+
+    public async Task CloseOpenServerSessionsAsync(string reason, string? exceptRunId = null)
+    {
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "update server_sessions set ended_at=$ended,end_reason=$reason where ended_at is null and end_reason='running'" +
+            (exceptRunId is null ? "" : " and run_id<>$except");
+        command.Parameters.AddWithValue("$ended", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$reason", reason);
+        if (exceptRunId is not null) command.Parameters.AddWithValue("$except", exceptRunId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    static PersistedServerRuntime ReadServerRuntime(SqliteDataReader reader) => new(
+        reader.GetString(0),
+        reader.IsDBNull(1) ? null : reader.GetString(1),
+        reader.IsDBNull(2) ? null : reader.GetString(2),
+        reader.IsDBNull(3) ? null : reader.GetString(3),
+        reader.IsDBNull(4) ? null : reader.GetString(4),
+        reader.IsDBNull(5) ? null : reader.GetInt32(5),
+        reader.IsDBNull(6) ? null : reader.GetInt64(6),
+        reader.IsDBNull(7) ? null : reader.GetString(7),
+        DateTimeOffset.Parse(reader.GetString(8)),
+        DateTimeOffset.Parse(reader.GetString(9)),
+        reader.IsDBNull(10) ? null : reader.GetString(10),
+        JsonSerializer.Deserialize<int[]>(reader.GetString(11)) ?? []);
 
     static async Task ApplyPlayerTrackingV2MigrationAsync(SqliteConnection connection)
     {

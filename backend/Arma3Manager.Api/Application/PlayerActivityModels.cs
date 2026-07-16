@@ -4,6 +4,7 @@ namespace Arma3Manager.Api.Application;
 
 public sealed record ServerRunStarted(string RunId, DateTimeOffset StartedAt, int Pid);
 public sealed record ServerRunEnded(string RunId, DateTimeOffset EndedAt, int? ExitCode, string Reason);
+public sealed record ServerProcessIdentity(int Pid, long StartedAtUtcTicks, string BinaryPath);
 
 public sealed record PlayerSignal(
     string RunId,

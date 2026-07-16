@@ -9,12 +9,23 @@ namespace Arma3Manager.Api.Application;
 
 public sealed record LogGapEvent(long RequestedId, long OldestAvailableId, long NewestAvailableId);
 public sealed record LogHeartbeatEvent(DateTimeOffset Ts);
-public sealed record LogStatusEvent(bool Running, int? Pid, string? RunId);
 public sealed record LogBatchEvent(IReadOnlyList<LogEntry> Entries);
 
 /// <summary>Produces resumable, typed server-sent events from bounded per-client subscriptions.</summary>
-public sealed class LogStreamService(RuntimeState runtime, ILogger<LogStreamService> logger)
+public sealed class LogStreamService
 {
+    readonly RuntimeState runtime;
+    readonly ServerLifecycleCoordinator? lifecycle;
+    readonly ILogger<LogStreamService> logger;
+
+    public LogStreamService(RuntimeState runtime, ILogger<LogStreamService> logger) : this(runtime, null, logger) { }
+    public LogStreamService(RuntimeState runtime, ServerLifecycleCoordinator? lifecycle, ILogger<LogStreamService> logger)
+    {
+        this.runtime = runtime;
+        this.lifecycle = lifecycle;
+        this.logger = logger;
+    }
+
     public const int MaxBatchEntries = 100;
     public const int MaxBatchBytes = 256 * 1024;
     public static readonly TimeSpan BatchWindow = TimeSpan.FromMilliseconds(50);
@@ -28,8 +39,7 @@ public sealed class LogStreamService(RuntimeState runtime, ILogger<LogStreamServ
     {
         var connectionId = Guid.NewGuid().ToString("N")[..8];
         var lastId = Math.Max(0, afterId);
-        var wasRunning = runtime.IsRunning;
-        var lastRunId = runtime.RunId;
+        var previousStatus = await CurrentStatusAsync();
         var nextHeartbeat = DateTimeOffset.UtcNow.Add(HeartbeatInterval);
         await using var subscription = runtime.SubscribeToLogs(lastId);
         logger.LogInformation("Log SSE {ConnectionId} opened after event {LastId}; batched={Batched}", connectionId, lastId, batch);
@@ -40,7 +50,7 @@ public sealed class LogStreamService(RuntimeState runtime, ILogger<LogStreamServ
             {
                 ReconnectionInterval = ReconnectInterval
             };
-            yield return new SseItem<object>(new LogStatusEvent(wasRunning, runtime.ProcessId, lastRunId), "status");
+            yield return new SseItem<object>(previousStatus, "status");
 
             var initial = subscription.Initial;
             if (initial.HasGap && initial.OldestAvailableId is long initialOldest && initial.NewestAvailableId is long initialNewest)
@@ -115,13 +125,12 @@ public sealed class LogStreamService(RuntimeState runtime, ILogger<LogStreamServ
                     }
                 }
 
-                var isRunning = runtime.IsRunning;
-                var currentRunId = runtime.RunId;
-                if (isRunning != wasRunning || currentRunId != lastRunId)
+                var currentStatus = await CurrentStatusAsync();
+                if (currentStatus.Phase != previousStatus.Phase || currentStatus.Stage != previousStatus.Stage ||
+                    currentStatus.Pid != previousStatus.Pid || currentStatus.OperationId != previousStatus.OperationId)
                 {
-                    yield return new SseItem<object>(new LogStatusEvent(isRunning, runtime.ProcessId, currentRunId), "status");
-                    wasRunning = isRunning;
-                    lastRunId = currentRunId;
+                    yield return new SseItem<object>(currentStatus, "status");
+                    previousStatus = currentStatus;
                 }
 
                 if (DateTimeOffset.UtcNow >= nextHeartbeat)
@@ -181,4 +190,12 @@ public sealed class LogStreamService(RuntimeState runtime, ILogger<LogStreamServ
         item.Data is LogEntry entry ? entry.Id : ((LogBatchEvent)item.Data).Entries[^1].Id;
 
     static int EntryBytes(LogEntry entry) => Encoding.UTF8.GetByteCount(entry.Data) + 256;
+
+    async Task<ServerLifecycleStatus> CurrentStatusAsync()
+    {
+        if (lifecycle is not null) return await lifecycle.GetStatusAsync();
+        var running = runtime.IsRunning;
+        return new(running ? "running" : "stopped", running, false, null, null, DateTimeOffset.UtcNow,
+            null, running, runtime.ProcessId, runtime.RunId, []);
+    }
 }

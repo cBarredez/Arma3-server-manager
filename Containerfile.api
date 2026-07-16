@@ -26,6 +26,7 @@ RUN dpkg --add-architecture i386 \
       unzip \
       tar \
       tini \
+      util-linux \
       locales \
       tzdata \
     && locale-gen en_US.UTF-8 \

@@ -36,6 +36,18 @@ public sealed record FactoryResetRequest(string CurrentPassword, string Confirma
 public sealed record RestartAppRequest(string CurrentPassword);
 public sealed record MetricsSample(string RunId, DateTimeOffset SampledAt, double? CpuPercent, double CoresCapacity, long MemoryUsedBytes, double MemoryPercent);
 public sealed record MetricsSessionSummary(string RunId, DateTimeOffset StartedAt, DateTimeOffset? EndedAt, int SampleCount, double? AvgCpuPercent, double? PeakCpuPercent, double CoresCapacity, double? AvgMemoryPercent, double? PeakMemoryPercent);
+public sealed record ServerLifecycleStatus(
+    string Phase,
+    bool Running,
+    bool Busy,
+    string? Stage,
+    string? OperationId,
+    DateTimeOffset Since,
+    string? LastError,
+    bool Managed,
+    int? Pid,
+    string? RunId,
+    int[] ConflictingPids);
 public sealed record PanelAuth(string Username, string PasswordSalt, string PasswordHash);
 public sealed record RconPlayer(int Id, string Guid, string Name, string Ip, int Ping, bool Lobby, bool Verified);
 public sealed record RconCommandRequest(string Command);

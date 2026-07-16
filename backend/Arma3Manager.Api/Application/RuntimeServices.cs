@@ -187,6 +187,7 @@ public sealed class RuntimeState(LogHub logHub)
 {
     Process? process;
     string? runId;
+    readonly object processGate = new();
     readonly Dictionary<string, string> requestedEndReasons = new(StringComparer.Ordinal);
     readonly HashSet<string> endedRuns = new(StringComparer.Ordinal);
     readonly List<Process> headlessClients = [];
@@ -197,7 +198,7 @@ public sealed class RuntimeState(LogHub logHub)
     public RuntimeState() : this(new LogHub()) { }
     public IReadOnlyList<LogEntry> Logs => logHub.Snapshot();
     public IReadOnlyList<LogEntry> GetLogs(int limit) => logHub.Snapshot(limit);
-    public string? RunId => runId;
+    public string? RunId { get { lock (processGate) return runId; } }
     public event Action<ServerRunStarted>? RunStarted;
     public event Action<ServerRunEnded>? RunEnded;
 
@@ -213,47 +214,61 @@ public sealed class RuntimeState(LogHub logHub)
     public Task<LogReadResult> WaitForLogReadAsync(long id, TimeSpan timeout, CancellationToken ct) =>
         logHub.WaitForAfterAsync(id, timeout, ct);
 
-    public bool IsRunning => process is { HasExited: false };
+    public bool IsRunning
+    {
+        get
+        {
+            lock (processGate)
+            {
+                try { return process is { HasExited: false }; }
+                catch { return false; }
+            }
+        }
+    }
     public bool IsMaintenanceBusy
     {
         get { lock (queuedTaskKeys) return taskGate.CurrentCount == 0 || queuedTaskKeys.Count > 0; }
     }
-    public int? ProcessId => IsRunning ? process!.Id : null;
+    public int? ProcessId { get { lock (processGate) return IsRunning ? process!.Id : null; } }
     public int[] HeadlessClientPids
     {
         get { lock (headlessClients) return headlessClients.Where(hc => hc is { HasExited: false }).Select(hc => hc.Id).ToArray(); }
     }
 
-    public void Start(string file, IEnumerable<string> arguments, string workingDirectory, string? profilesDir = null)
+    public ServerProcessIdentity Start(string file, IEnumerable<string> arguments, string workingDirectory, string? profilesDir = null, string? singletonLockFile = null)
     {
         var startedAtUtc = DateTime.UtcNow;
         var currentRunId = Guid.NewGuid().ToString("N");
-        runId = currentRunId;
-        var started = StartProcess(file, arguments, workingDirectory, source: "arma", runId: currentRunId);
-        process = started;
+        var executable = file;
+        var capturedArguments = arguments.ToArray();
+        if (!string.IsNullOrWhiteSpace(singletonLockFile) && OperatingSystem.IsLinux())
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(singletonLockFile)!);
+            var flock = File.Exists("/usr/bin/flock") ? "/usr/bin/flock" : File.Exists("/bin/flock") ? "/bin/flock" : null;
+            if (flock is null) throw new InvalidOperationException("flock is required to enforce the single-server runtime lock");
+            executable = flock;
+            capturedArguments = ["--no-fork", "--nonblock", "--conflict-exit-code", "73", singletonLockFile, file, .. capturedArguments];
+        }
+
+        lock (processGate)
+        {
+            if (process is { HasExited: false }) throw new InvalidOperationException($"Server PID {process.Id} is already running");
+        }
+
+        var started = StartProcess(executable, capturedArguments, workingDirectory, source: "arma", runId: currentRunId);
+        lock (processGate)
+        {
+            if (process is { HasExited: false })
+            {
+                started.Kill(entireProcessTree: true);
+                throw new InvalidOperationException($"Server PID {process.Id} won the start race");
+            }
+            process = started;
+            runId = currentRunId;
+        }
+        ObserveMainProcess(started, currentRunId);
         RunStarted?.Invoke(new(currentRunId, DateTimeOffset.UtcNow, started.Id));
         Push("system", $"Started {file} PID {started.Id}", "manager", currentRunId);
-        started.Exited += (_, _) =>
-        {
-            Push("system", $"Server exited with code {started.ExitCode}", "manager", currentRunId);
-            string reason;
-            lock (requestedEndReasons)
-            {
-                reason = requestedEndReasons.Remove(currentRunId, out var requested)
-                    ? requested
-                    : started.ExitCode == 0 ? "process_exit" : "crash";
-            }
-            lock (endedRuns)
-            {
-                if (endedRuns.Add(currentRunId))
-                    RunEnded?.Invoke(new(currentRunId, DateTimeOffset.UtcNow, started.ExitCode, reason));
-            }
-            lock (headlessClients)
-            {
-                foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
-                headlessClients.Clear();
-            }
-        };
 
         rptCts?.Cancel();
         if (!string.IsNullOrWhiteSpace(profilesDir))
@@ -262,6 +277,59 @@ public sealed class RuntimeState(LogHub logHub)
             rptCts = cts;
             _ = TailRptAsync(profilesDir, startedAtUtc, currentRunId, cts.Token);
         }
+        return new(started.Id, started.StartTime.ToUniversalTime().Ticks, Path.GetFullPath(file));
+    }
+
+    public ServerProcessIdentity Adopt(int pid, string adoptedRunId, string binaryPath)
+    {
+        var adopted = Process.GetProcessById(pid);
+        if (adopted.HasExited) throw new InvalidOperationException($"Server PID {pid} already exited");
+        lock (processGate)
+        {
+            if (process is { HasExited: false } && process.Id != pid)
+                throw new InvalidOperationException($"Cannot adopt PID {pid}; PID {process.Id} is already managed");
+            process = adopted;
+            runId = adoptedRunId;
+        }
+        ObserveMainProcess(adopted, adoptedRunId);
+        Push("system", $"Recovered managed server PID {pid}", "manager", adoptedRunId);
+        return new(pid, adopted.StartTime.ToUniversalTime().Ticks, Path.GetFullPath(binaryPath));
+    }
+
+    void ObserveMainProcess(Process started, string currentRunId)
+    {
+        started.EnableRaisingEvents = true;
+        started.Exited += (_, _) =>
+        {
+            int? exitCode = null;
+            try { exitCode = started.ExitCode; } catch { }
+            Push("system", $"Server exited" + (exitCode is null ? "" : $" with code {exitCode}"), "manager", currentRunId);
+            string reason;
+            lock (requestedEndReasons)
+            {
+                reason = requestedEndReasons.Remove(currentRunId, out var requested)
+                    ? requested
+                    : exitCode is 0 ? "process_exit" : "crash";
+            }
+            lock (processGate)
+            {
+                if (ReferenceEquals(process, started))
+                {
+                    process = null;
+                    if (runId == currentRunId) runId = null;
+                }
+            }
+            lock (endedRuns)
+            {
+                if (endedRuns.Add(currentRunId))
+                    RunEnded?.Invoke(new(currentRunId, DateTimeOffset.UtcNow, exitCode, reason));
+            }
+            lock (headlessClients)
+            {
+                foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
+                headlessClients.Clear();
+            }
+        };
     }
 
     // Arma writes most connection/desync/addon-mismatch diagnostics to its .rpt report file in the profiles
@@ -329,25 +397,29 @@ public sealed class RuntimeState(LogHub logHub)
 
     public void Stop(string reason = "stopped")
     {
-        if (runId is not null)
-            lock (requestedEndReasons) requestedEndReasons[runId] = reason;
-        if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
+        Process? stopping;
+        string? stoppingRunId;
+        lock (processGate) { stopping = process; stoppingRunId = runId; }
+        if (stoppingRunId is not null)
+            lock (requestedEndReasons) requestedEndReasons[stoppingRunId] = reason;
+        if (stopping is { HasExited: false }) stopping.Kill(entireProcessTree: true);
         lock (headlessClients)
         {
             foreach (var hc in headlessClients) if (hc is { HasExited: false }) hc.Kill(entireProcessTree: true);
             headlessClients.Clear();
         }
-        Push("system", "Server stopped", "manager", runId);
+        Push("system", "Server stopped", "manager", stoppingRunId);
         rptCts?.Cancel();
     }
 
     public async Task StopAsync(string reason = "stopped", CancellationToken ct = default)
     {
-        var stopping = process;
+        Process? stopping;
+        lock (processGate) stopping = process;
         Stop(reason);
         if (stopping is null || stopping.HasExited) return;
         try { await stopping.WaitForExitAsync(ct).WaitAsync(TimeSpan.FromSeconds(15), ct); }
-        catch (TimeoutException) { Push("stderr", "Timed out waiting for the server process to stop", "manager", runId); }
+        catch (TimeoutException) { Push("stderr", "Timed out waiting for the server process to stop", "manager", RunId); }
     }
 
     public bool RunTask(string file, IEnumerable<string> arguments, string kind, Func<int, Task>? onExit = null, string? dedupeKey = null)
