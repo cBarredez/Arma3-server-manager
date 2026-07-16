@@ -262,6 +262,8 @@ html, body {
   background: var(--success);
   box-shadow: none;
 }
+.status-dot.busy { background: var(--warning); }
+.status-dot.blocked { background: var(--danger); }
 
 .server-controls { display: flex; gap: .4rem; }
 
@@ -1015,6 +1017,10 @@ body .toast-header {
 .status-ring.busy {
   color: var(--warning);
   border-color: var(--warning);
+}
+.status-ring.blocked {
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 .server-ctrl-title  { font-size: 1.1rem; font-weight: 700; }

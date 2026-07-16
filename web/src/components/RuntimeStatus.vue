@@ -1,12 +1,12 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { lifecyclePresentation, normalizeServerStatus } from '../scripts/server-lifecycle.js';
 
-const running = ref(false);
-const busy = ref(false);
+const status = ref(normalizeServerStatus());
+const presentation = computed(() => lifecyclePresentation(status.value));
 
 function applyStatus(event) {
-  running.value = Boolean(event.detail?.running);
-  busy.value = Boolean(event.detail?.busy);
+  status.value = normalizeServerStatus(event.detail);
 }
 
 onMounted(async () => {
@@ -16,9 +16,9 @@ onMounted(async () => {
     const response = await fetch(`${base}/api/server/status`, {
       credentials: base ? 'include' : 'same-origin',
     });
-    if (response.ok) running.value = Boolean((await response.json()).running);
+    if (response.ok) status.value = normalizeServerStatus(await response.json());
   } catch {
-    running.value = false;
+    status.value = normalizeServerStatus();
   }
 });
 
@@ -26,8 +26,8 @@ onUnmounted(() => window.removeEventListener('arma3:status', applyStatus));
 </script>
 
 <template>
-  <div id="server-status-badge" :aria-label="`Server ${running ? 'online' : 'offline'}`">
-    <span class="status-dot" :class="busy ? 'busy' : running ? 'online' : 'offline'"></span>
-    <span id="status-text">{{ busy ? 'Processing…' : running ? 'Online' : 'Offline' }}</span>
+  <div id="server-status-badge" :aria-label="`Server ${presentation.label}`">
+    <span class="status-dot" :class="presentation.tone"></span>
+    <span id="status-text">{{ presentation.label }}</span>
   </div>
 </template>

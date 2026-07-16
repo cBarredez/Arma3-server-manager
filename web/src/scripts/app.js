@@ -15,6 +15,7 @@ import {
   virtualLogRange,
 } from './log-viewer.js';
 import { buildPlayerQuery, connectionIdentity, friendlyReason, trackingFieldValue } from './player-activity.js';
+import { lifecycleNotice, lifecyclePresentation, normalizeServerStatus } from './server-lifecycle.js';
 
 'use strict';
 
@@ -138,6 +139,7 @@ function renderUsageMetric(valueId, detailId, metric) {
 const state = {
   view        : 'dashboard',
   serverRunning: false,
+  serverStatus : normalizeServerStatus(),
   currentConfig: 'server.cfg',
   currentFilePath: null,
   fileItems   : [],
@@ -314,10 +316,13 @@ function loadView(name, pushState = true, filePath = null) {
 // SOCKET.IO
 // ════════════════════════════════════════════════════════════════════════════════
 function initSocket() {
+  const pollStatus = () => GET('/api/server/status').then(updateServerStatus).catch(() => {});
+  pollStatus();
+  setInterval(pollStatus, 2000);
+
   if (REST_ONLY || typeof io !== 'function') {
     const pollDashboard = () => {
       if (state.view === 'dashboard') {
-        GET('/api/server/status').then(d => updateServerStatus(d.running)).catch(() => {});
         GET('/api/metrics').then(d => {
           renderMetrics(d);
           pushHistory(metricNumber(d.cpu?.load), metricNumber(d.memory?.percent));
@@ -331,9 +336,9 @@ function initSocket() {
 
   state.socket = io({ transports: ['websocket'] });
 
-  state.socket.on('server:status',  d => updateServerStatus(d.running));
+  state.socket.on('server:status',  d => updateServerStatus(d));
   state.socket.on('server:started', d => {
-    updateServerStatus(true);
+    updateServerStatus({ ...state.serverStatus, phase: 'running', running: true, pid: d.pid });
     const pid = document.getElementById('dash-pid-text');
     if (pid) pid.textContent = `· PID ${d.pid}`;
     const info = document.getElementById('info-pid');
@@ -342,14 +347,14 @@ function initSocket() {
     toast('Server started (PID ' + d.pid + ')');
   });
   state.socket.on('server:stopped', d => {
-    updateServerStatus(false);
+    updateServerStatus({ phase: 'stopped', running: false });
     const pid = document.getElementById('dash-pid-text');
     if (pid) pid.textContent = '';
     setActionBar(false);
     toast('Server stopped', d.code === 0 ? 'success' : 'error');
   });
   state.socket.on('server:error', d => {
-    updateServerStatus(false);
+    updateServerStatus({ phase: 'faulted', running: false, lastError: d.message });
     setActionBar(false);
     toast(d.message, 'error');
   });
@@ -392,23 +397,26 @@ function initSocket() {
 }
 
 // ─── Server status helpers ────────────────────────────────────────────────────
-function updateServerStatus(running, busy = false) {
-  state.serverRunning = running;
-  window.dispatchEvent(new CustomEvent('arma3:status', { detail: { running, busy } }));
+function updateServerStatus(value) {
+  const status = normalizeServerStatus(value);
+  const presentation = lifecyclePresentation(status);
+  state.serverStatus = status;
+  state.serverRunning = status.running;
+  window.dispatchEvent(new CustomEvent('arma3:status', { detail: status }));
 
   // ── Topbar badge ──────────────────────────────────────────────────────────
   const topDot  = document.querySelector('#server-status-badge .status-dot');
   const topText = document.getElementById('status-text');
-  if (topDot)  topDot.className    = 'status-dot ' + (running ? 'online' : 'offline');
-  if (topText) topText.textContent = running ? 'Online' : 'Offline';
+  if (topDot)  topDot.className    = 'status-dot ' + presentation.tone;
+  if (topText) topText.textContent = presentation.label;
 
   // Topbar mini-buttons
   const topStart   = document.getElementById('btn-start');
   const topStop    = document.getElementById('btn-stop');
   const topRestart = document.getElementById('btn-restart');
-  if (topStart)   topStart.disabled   = running || busy;
-  if (topStop)    topStop.disabled    = !running || busy;
-  if (topRestart) topRestart.disabled = !running || busy;
+  if (topStart)   topStart.disabled   = !presentation.canStart;
+  if (topStop)    topStop.disabled    = !presentation.canStop;
+  if (topRestart) topRestart.disabled = !presentation.canRestart;
 
   // ── Dashboard control card ────────────────────────────────────────────────
   const ring    = document.getElementById('dash-status-ring');
@@ -420,25 +428,28 @@ function updateServerStatus(running, busy = false) {
   const dRestart= document.getElementById('dash-btn-restart');
 
   if (ring) {
-    ring.className = 'status-ring ' + (busy ? 'busy' : running ? 'online' : 'offline');
+    ring.className = 'status-ring ' + presentation.tone;
   }
-  if (dashDot)  dashDot.className    = 'status-dot ' + (running ? 'online' : 'offline');
-  if (dashTxt)  dashTxt.textContent  = busy ? 'Processing…' : running ? 'Online' : 'Offline';
-  if (dashTxt)  dashTxt.style.color  = busy ? 'var(--warning)' : running ? 'var(--accent)' : 'var(--text-muted)';
+  if (dashDot)  dashDot.className    = 'status-dot ' + presentation.tone;
+  if (dashTxt)  dashTxt.textContent  = presentation.label;
+  if (dashTxt)  dashTxt.style.color  = status.busy || status.phase === 'blocked' ? 'var(--warning)' : status.running ? 'var(--accent)' : 'var(--text-muted)';
 
-  if (dStart)   dStart.disabled   = running || busy;
-  if (dStop)    dStop.disabled    = !running || busy;
-  if (dRestart) dRestart.disabled = !running || busy;
+  if (dStart)   dStart.disabled   = !presentation.canStart;
+  if (dStop)    dStop.disabled    = !presentation.canStop;
+  if (dRestart) dRestart.disabled = !presentation.canRestart;
 
   // ── Info panel badge ──────────────────────────────────────────────────────
   const badge = document.getElementById('info-status');
   if (badge) {
-    badge.textContent = running ? 'Online' : 'Offline';
-    badge.className   = 'badge ' + (running ? 'bg-success' : 'bg-danger');
+    badge.textContent = presentation.label;
+    badge.className   = 'badge ' + (status.running ? 'bg-success' : status.busy || status.phase === 'blocked' ? 'bg-warning text-dark' : 'bg-danger');
   }
 
-  // PID label in control card
-  if (dashPid) dashPid.textContent = '';
+  if (dashPid) dashPid.textContent = status.pid ? `· PID ${status.pid}` : '';
+  const infoPid = document.getElementById('info-pid');
+  if (infoPid) infoPid.textContent = status.pid || '—';
+  if (status.busy || status.phase === 'blocked' || status.phase === 'faulted') setActionBar(true, lifecycleNotice(status));
+  else setActionBar(false);
 }
 
 // ─── Action bar helper ────────────────────────────────────────────────────────
@@ -458,29 +469,35 @@ function setActionBar(visible, msg = 'Processing…') {
 function initServerControls() {
   // Shared handler used by both topbar and dashboard buttons
   async function doStart() {
-    updateServerStatus(false, true);
     setActionBar(true, 'Starting server…');
-    try { await POST('/api/server/start'); } catch (e) {
-      updateServerStatus(false);
-      setActionBar(false);
+    try {
+      const response = await POST('/api/server/start');
+      updateServerStatus(response.status || { phase: 'preparing' });
+    } catch (e) {
+      if (e.data?.status) updateServerStatus(e.data.status);
+      else setActionBar(false);
       toast(e.message, 'error');
     }
   }
   async function doStop() {
-    updateServerStatus(true, true);
     setActionBar(true, 'Stopping server…');
-    try { await POST('/api/server/stop'); } catch (e) {
-      updateServerStatus(state.serverRunning);
-      setActionBar(false);
+    try {
+      const response = await POST('/api/server/stop');
+      updateServerStatus(response.status || { phase: 'stopped' });
+    } catch (e) {
+      if (e.data?.status) updateServerStatus(e.data.status);
+      else setActionBar(false);
       toast(e.message, 'error');
     }
   }
   async function doRestart() {
-    updateServerStatus(true, true);
     setActionBar(true, 'Restarting server…');
-    try { await POST('/api/server/restart'); } catch (e) {
-      updateServerStatus(state.serverRunning);
-      setActionBar(false);
+    try {
+      const response = await POST('/api/server/restart');
+      updateServerStatus(response.status || { phase: 'preparing' });
+    } catch (e) {
+      if (e.data?.status) updateServerStatus(e.data.status);
+      else setActionBar(false);
       toast(e.message, 'error');
     }
   }
@@ -500,13 +517,9 @@ function initServerControls() {
 
   // Get initial status
   GET('/api/server/status').then(d => {
-    updateServerStatus(d.running);
-    const pid = document.getElementById('dash-pid-text');
-    if (pid && d.pid) pid.textContent = `· PID ${d.pid}`;
-    const infoPid  = document.getElementById('info-pid');
+    updateServerStatus(d);
     const infoPort = document.getElementById('info-port');
     const joinAddress = document.getElementById('info-join-address');
-    if (infoPid)  infoPid.textContent  = d.pid  || '—';
     if (infoPort) infoPort.textContent = d.port || '—';
     if (joinAddress) joinAddress.textContent = getJoinAddress(d);
   }).catch(() => {});
@@ -2409,12 +2422,7 @@ function startLogStream(out, generation) {
     if (!logConnections.owns(generation, source)) return;
     touchLogStream();
     try {
-      const { running, pid } = JSON.parse(e.data);
-      updateServerStatus(running);
-      if (pid) {
-        const el = document.getElementById('dash-pid-text');
-        if (el) el.textContent = `· PID ${pid}`;
-      }
+      updateServerStatus(JSON.parse(e.data));
     } catch { /* ignore */ }
   });
 
