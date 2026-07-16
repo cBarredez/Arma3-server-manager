@@ -16,6 +16,7 @@ import {
 } from './log-viewer.js';
 import { buildPlayerQuery, connectionIdentity, friendlyReason, trackingFieldValue } from './player-activity.js';
 import { lifecycleNotice, lifecyclePresentation, normalizeServerStatus } from './server-lifecycle.js';
+import { buildMetricSessionQuery, chartSeries, cpuCores, newestSessions } from './metrics-sessions.js';
 
 'use strict';
 
@@ -152,6 +153,8 @@ const state = {
   steamCmdModal: null,
   factoryResetModal: null,
   restartAppModal: null,
+  sessionExplorerModal: null,
+  sessionDetailChart: null,
   presetMods  : [],
 };
 
@@ -325,7 +328,7 @@ function initSocket() {
       if (state.view === 'dashboard') {
         GET('/api/metrics').then(d => {
           renderMetrics(d);
-          pushHistory(metricNumber(d.cpu?.load), metricNumber(d.memory?.percent));
+          pushHistory(metricNumber(d.cpu?.usagePercent ?? d.cpu?.load), metricNumber(d.memory?.percent));
         }).catch(() => {});
       }
     };
@@ -619,6 +622,8 @@ function initDashboard() {
   initChart();
   loadSessions();
   document.getElementById('btn-refresh-sessions').onclick = () => loadSessions();
+  initSessionExplorer();
+  document.getElementById('btn-open-session-explorer').onclick = () => openSessionExplorer();
 
   document.getElementById('btn-install-server').onclick = async event => {
     const button = event.currentTarget;
@@ -642,28 +647,32 @@ async function loadSessions() {
   const body = document.getElementById('sessions-table-body');
   if (!body) return;
   try {
-    const sessions = await GET('/api/metrics/sessions');
+    const page = await GET('/api/sessions?limit=10');
+    const sessions = newestSessions(page.items, 10);
     if (!sessions.length) {
-      body.innerHTML = '<tr><td colspan="6" class="text-muted">No sessions recorded yet.</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="text-muted py-3">No sessions recorded yet.</td></tr>';
       return;
     }
     body.innerHTML = sessions.map(session => {
       const started = new Date(session.startedAt);
       const endMs = session.endedAt ? new Date(session.endedAt).getTime() : Date.now();
       const duration = formatDuration(endMs - started.getTime());
-      const cpu = `${fmtPercent(session.avgCpuPercent)} / ${fmtPercent(session.peakCpuPercent)}`;
+      const cpu = `${fmtPercent(session.avgCpuUsagePercent)} / ${fmtPercent(session.peakCpuUsagePercent)}`;
+      const cores = `${fmtCores(session.avgCpuCoresUsed)} / ${fmtCores(session.peakCpuCoresUsed)}`;
       const ram = `${fmtPercent(session.avgMemoryPercent)} / ${fmtPercent(session.peakMemoryPercent)}`;
       const ongoing = session.endedAt ? '' : ' <span class="badge bg-success ms-1">Live</span>';
+      const population = `${fmtCount(session.peakActivePlayers)} <span>/</span> ${fmtCount(session.peakActiveHeadlessClients)}`;
       return `
-        <tr>
+        <tr data-explore-session="${escAttr(session.runId)}" tabindex="0" role="button" aria-label="Inspect session ${escAttr(session.runId)}">
           <td>${started.toLocaleString()}${ongoing}</td>
           <td>${duration}</td>
-          <td>${cpu}</td>
-          <td>${session.coresCapacity?.toFixed(1) ?? '—'}</td>
-          <td>${ram}</td>
+          <td class="metric-pair cpu-pair">${cpu}</td>
+          <td class="metric-pair">${cores}</td>
+          <td class="metric-pair ram-pair">${ram}</td>
+          <td class="population-pair"><i class="fa fa-user-group"></i>${population}<i class="fa fa-robot"></i></td>
           <td class="text-end">
-            <button class="btn btn-sm btn-outline-primary me-1" data-open-log-session="${escAttr(session.runId)}" title="Inspect player activity">
-              <i class="fa fa-users-viewfinder"></i>
+            <button class="btn btn-sm btn-outline-primary me-1" data-open-metric-session="${escAttr(session.runId)}" title="Inspect telemetry">
+              <i class="fa fa-chart-line"></i>
             </button>
             <button class="btn btn-sm btn-outline-secondary" data-download-session="${escAttr(session.runId)}" title="Download CSV">
               <i class="fa fa-download"></i>
@@ -672,18 +681,253 @@ async function loadSessions() {
         </tr>`;
     }).join('');
     body.querySelectorAll('[data-download-session]').forEach(btn => {
-      btn.onclick = () => downloadSessionCsv(btn.dataset.downloadSession);
+      btn.onclick = event => { event.stopPropagation(); downloadSessionCsv(btn.dataset.downloadSession); };
     });
-    body.querySelectorAll('[data-open-log-session]').forEach(btn => {
-      btn.onclick = () => {
-        pendingLogSession = btn.dataset.openLogSession;
-        loadView('logs');
-        selectLogPanel('players');
+    body.querySelectorAll('[data-open-metric-session]').forEach(btn => {
+      btn.onclick = event => { event.stopPropagation(); openSessionExplorer(btn.dataset.openMetricSession); };
+    });
+    body.querySelectorAll('[data-explore-session]').forEach(row => {
+      row.onclick = () => openSessionExplorer(row.dataset.exploreSession);
+      row.onkeydown = event => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        openSessionExplorer(row.dataset.exploreSession);
       };
     });
   } catch {
-    body.innerHTML = '<tr><td colspan="6" class="text-danger">Failed to load sessions.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="text-danger py-3">Failed to load sessions.</td></tr>';
   }
+}
+
+let metricExplorerInitialized = false;
+let metricSessions = [];
+let metricSessionsCursor = null;
+let selectedMetricRunId = null;
+let metricSessionListAbort = null;
+let metricSessionDetailAbort = null;
+
+function initSessionExplorer() {
+  if (metricExplorerInitialized) return;
+  metricExplorerInitialized = true;
+  state.sessionExplorerModal = new bootstrap.Modal(document.getElementById('session-explorer-modal'));
+  setMetricSessionRange(90);
+
+  document.querySelectorAll('[data-session-range]').forEach(button => {
+    button.onclick = () => {
+      setMetricSessionRange(Number(button.dataset.sessionRange));
+      selectedMetricRunId = null;
+      loadMetricSessions(false);
+    };
+  });
+  document.getElementById('session-explorer-filters').onsubmit = event => {
+    event.preventDefault();
+    document.querySelectorAll('[data-session-range]').forEach(button => button.classList.remove('active'));
+    selectedMetricRunId = null;
+    loadMetricSessions(false);
+  };
+  document.getElementById('session-filter-reset').onclick = () => {
+    document.getElementById('session-filter-status').value = '';
+    document.getElementById('session-filter-query').value = '';
+    document.getElementById('session-filter-sort').value = 'newest';
+    setMetricSessionRange(90);
+    selectedMetricRunId = null;
+    loadMetricSessions(false);
+  };
+  document.getElementById('btn-load-more-metric-sessions').onclick = () => loadMetricSessions(true);
+  document.getElementById('btn-session-detail-csv').onclick = () => selectedMetricRunId && downloadSessionCsv(selectedMetricRunId);
+  document.getElementById('btn-session-player-activity').onclick = () => {
+    if (!selectedMetricRunId) return;
+    const runId = selectedMetricRunId;
+    state.sessionExplorerModal.hide();
+    pendingLogSession = runId;
+    loadView('logs');
+    selectLogPanel('players');
+  };
+  document.getElementById('session-explorer-modal').addEventListener('hidden.bs.modal', () => {
+    metricSessionListAbort?.abort();
+    metricSessionDetailAbort?.abort();
+  });
+}
+
+function openSessionExplorer(runId = null) {
+  initSessionExplorer();
+  selectedMetricRunId = runId;
+  state.sessionExplorerModal.show();
+  loadMetricSessions(false, runId);
+}
+
+function setMetricSessionRange(days) {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - Math.max(days - 1, 0));
+  document.getElementById('session-filter-from').value = localDateInput(from);
+  document.getElementById('session-filter-to').value = localDateInput(to);
+  document.querySelectorAll('[data-session-range]').forEach(button => {
+    button.classList.toggle('active', Number(button.dataset.sessionRange) === days);
+  });
+}
+
+function localDateInput(date) {
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function metricSessionFilters() {
+  return {
+    from: document.getElementById('session-filter-from').value,
+    to: document.getElementById('session-filter-to').value,
+    status: document.getElementById('session-filter-status').value,
+    query: document.getElementById('session-filter-query').value,
+    sort: document.getElementById('session-filter-sort').value,
+  };
+}
+
+async function loadMetricSessions(append = false, preferredRunId = null) {
+  if (!append) {
+    metricSessionListAbort?.abort();
+    metricSessionListAbort = new AbortController();
+    metricSessionsCursor = null;
+    metricSessions = [];
+    document.getElementById('session-explorer-list').innerHTML = '<div class="session-explorer-message"><i class="fa fa-spinner fa-spin"></i> Loading sessions…</div>';
+  }
+  const signal = metricSessionListAbort?.signal;
+  const query = buildMetricSessionQuery(metricSessionFilters(), append ? metricSessionsCursor : null, 25);
+  try {
+    const page = await getJsonWithSignal(`/api/sessions?${query}`, signal);
+    if (signal?.aborted) return;
+    metricSessions = append ? [...metricSessions, ...page.items] : page.items;
+    metricSessionsCursor = page.nextCursor;
+    renderMetricSessionList();
+    document.getElementById('btn-load-more-metric-sessions').classList.toggle('d-none', !metricSessionsCursor);
+    const selectedInResults = metricSessions.some(session => session.runId === selectedMetricRunId);
+    const target = preferredRunId || (selectedInResults ? selectedMetricRunId : metricSessions[0]?.runId);
+    if (target) loadMetricSessionDetail(target);
+    else showMetricSessionEmpty('No runs match these filters', 'Try a wider date range or clear the Run ID filter.');
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    document.getElementById('session-explorer-list').innerHTML = `<div class="session-explorer-message text-danger"><i class="fa fa-triangle-exclamation"></i> ${escHtml(error.message)}</div>`;
+  }
+}
+
+function renderMetricSessionList() {
+  const list = document.getElementById('session-explorer-list');
+  document.getElementById('session-explorer-count').textContent = `${metricSessions.length}${metricSessionsCursor ? '+' : ''}`;
+  if (!metricSessions.length) {
+    list.innerHTML = '<div class="session-explorer-message">No matching sessions.</div>';
+    return;
+  }
+  list.innerHTML = metricSessions.map(session => {
+    const active = session.runId === selectedMetricRunId ? ' active' : '';
+    const end = session.endedAt ? new Date(session.endedAt).getTime() : Date.now();
+    const status = session.endedAt ? escHtml(session.endReason || 'ended') : 'LIVE';
+    return `<button type="button" class="session-run-item${active}" data-metric-run="${escAttr(session.runId)}">
+      <span class="session-run-rail"></span>
+      <span class="session-run-main"><strong>${fmtDate(session.startedAt)}</strong><small>${escHtml(session.runId.slice(0, 12))} · ${formatDuration(end - new Date(session.startedAt).getTime())}</small></span>
+      <span class="session-run-load"><b>${fmtPercent(session.peakCpuUsagePercent)}</b><small>${status}</small></span>
+    </button>`;
+  }).join('');
+  list.querySelectorAll('[data-metric-run]').forEach(button => {
+    button.onclick = () => loadMetricSessionDetail(button.dataset.metricRun);
+  });
+}
+
+function showMetricSessionEmpty(title, message) {
+  document.getElementById('session-detail-content').classList.add('d-none');
+  const empty = document.getElementById('session-detail-empty');
+  empty.classList.remove('d-none');
+  empty.querySelector('strong').textContent = title;
+  empty.querySelector('span').textContent = message;
+}
+
+async function loadMetricSessionDetail(runId) {
+  selectedMetricRunId = runId;
+  renderMetricSessionList();
+  showMetricSessionEmpty('Loading telemetry…', 'Aligning CPU, memory and population samples.');
+  metricSessionDetailAbort?.abort();
+  metricSessionDetailAbort = new AbortController();
+  try {
+    const detail = await getJsonWithSignal(`/api/metrics/sessions/${encodeURIComponent(runId)}`, metricSessionDetailAbort.signal);
+    if (metricSessionDetailAbort.signal.aborted || selectedMetricRunId !== runId) return;
+    renderMetricSessionDetail(detail);
+  } catch (error) {
+    if (error.name !== 'AbortError') showMetricSessionEmpty('Telemetry unavailable', error.message);
+  }
+}
+
+function renderMetricSessionDetail(detail) {
+  const summary = detail.session;
+  document.getElementById('session-detail-empty').classList.add('d-none');
+  document.getElementById('session-detail-content').classList.remove('d-none');
+  const live = !summary.endedAt;
+  const status = document.getElementById('session-detail-status');
+  status.textContent = live ? '● LIVE' : 'ENDED';
+  status.classList.toggle('live', live);
+  setText('session-detail-started', fmtDate(summary.startedAt));
+  setText('session-detail-run-id', summary.runId);
+  setText('session-stat-cpu', `${fmtPercent(summary.avgCpuUsagePercent)} / ${fmtPercent(summary.peakCpuUsagePercent)}`);
+  setText('session-stat-cores', `${fmtCores(summary.avgCpuCoresUsed)} / ${fmtCores(summary.peakCpuCoresUsed)}`);
+  setText('session-stat-ram', `${fmtPercent(summary.avgMemoryPercent)} / ${fmtPercent(summary.peakMemoryPercent)}`);
+  setText('session-stat-population', `${fmtCount(summary.peakActivePlayers)} / ${fmtCount(summary.peakActiveHeadlessClients)}`);
+
+  const note = document.getElementById('session-detail-note');
+  const noSamples = detail.samples.length === 0;
+  const populationUnavailable = !noSamples && detail.samples.every(sample => sample.activePlayers == null && sample.activeHeadlessClients == null);
+  note.classList.toggle('d-none', !populationUnavailable && !noSamples);
+  note.querySelector('span').textContent = noSamples
+    ? 'No telemetry samples were recorded for this run.'
+    : populationUnavailable ? 'This session predates population sampling; CPU and RAM remain available.' : '';
+  renderMetricSessionChart(detail.samples);
+}
+
+async function renderMetricSessionChart(samples) {
+  const canvas = document.getElementById('chart-session-detail');
+  const { default: Chart } = await import('chart.js/auto');
+  state.sessionDetailChart?.destroy();
+  const series = chartSeries(samples);
+  state.sessionDetailChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: series.labels,
+      datasets: [
+        { label: 'CPU', data: series.cpu, borderColor: '#35c9e8', backgroundColor: 'rgba(53,201,232,.08)', fill: true, tension: .25, pointRadius: 0, borderWidth: 2, yAxisID: 'resources' },
+        { label: 'RAM', data: series.memory, borderColor: '#2fbf71', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 2, yAxisID: 'resources' },
+        { label: 'Players', data: series.players, borderColor: '#f2a93b', backgroundColor: 'transparent', stepped: 'before', pointRadius: 0, borderWidth: 1.5, spanGaps: false, yAxisID: 'population' },
+        { label: 'HC', data: series.headless, borderColor: '#9b7bff', backgroundColor: 'transparent', stepped: 'before', pointRadius: 0, borderWidth: 1.5, spanGaps: false, yAxisID: 'population' },
+      ],
+    },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#a9acb6', usePointStyle: true, boxWidth: 7, font: { size: 11, family: 'ui-monospace' } } },
+        tooltip: {
+          callbacks: {
+            title: items => items.length ? new Date(items[0].label).toLocaleString() : '',
+            label: context => context.dataset.label === 'CPU'
+              ? ` CPU: ${fmtPercent(context.parsed.y)} · ${fmtCores(cpuCores(context.parsed.y))} cores`
+              : ` ${context.dataset.label}: ${context.dataset.yAxisID === 'resources' ? fmtPercent(context.parsed.y) : context.parsed.y}`,
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: '#747783', maxTicksLimit: 8, callback: (_, index) => series.labels[index] ? new Date(series.labels[index]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '' } },
+        resources: { beginAtZero: true, grace: '10%', grid: { color: '#2c2d33' }, ticks: { color: '#747783', callback: value => `${value}%` }, title: { display: true, text: 'CPU / RAM %', color: '#747783' } },
+        population: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#747783', precision: 0 }, title: { display: true, text: 'Players / HC', color: '#747783' } },
+      },
+    },
+  });
+}
+
+function fmtCores(value) {
+  const number = metricNumber(value);
+  return number === null ? '—' : number.toFixed(number >= 10 ? 1 : 2);
+}
+
+function fmtCount(value) {
+  const number = metricNumber(value);
+  return number === null ? '—' : Math.round(number).toString();
 }
 
 function formatDuration(ms) {
@@ -722,7 +966,10 @@ function getJoinAddress(status) {
 }
 
 function renderMetrics(d) {
-  setText('m-cpu', fmtPercent(d.cpu?.load));
+  const usage = metricNumber(d.cpu?.usagePercent ?? d.cpu?.load);
+  const cores = metricNumber(d.cpu?.coresUsed) ?? cpuCores(usage);
+  setText('m-cpu', fmtPercent(usage));
+  setText('m-cpu-detail', cores === null ? '—' : `${fmtCores(cores)} cores equivalent`);
   renderUsageMetric('m-mem', 'm-mem-detail', d.memory);
   const temperature = metricNumber(d.temperature);
   setText('m-temp', temperature === null ? '—' : temperature + '°C');
@@ -741,7 +988,9 @@ function renderMetrics(d) {
 }
 
 function updateMetricCards(d) {
-  setText('m-cpu', fmtPercent(d.cpu));
+  const usage = metricNumber(d.cpuUsagePercent ?? d.cpu);
+  setText('m-cpu', fmtPercent(usage));
+  setText('m-cpu-detail', usage === null ? '—' : `${fmtCores(cpuCores(usage))} cores equivalent`);
   setText('m-mem', fmtPercent(d.mem));
 }
 
@@ -768,7 +1017,7 @@ async function initChart() {
       labels: [],
       datasets: [
         {
-          label: 'CPU %',
+          label: 'CPU · 100% / core',
           data: [],
           borderColor: '#388bfd',
           backgroundColor: 'rgba(56,139,253,.1)',
@@ -796,7 +1045,8 @@ async function initChart() {
       scales: {
         x: { display: false },
         y: {
-          min: 0, max: 100,
+          beginAtZero: true,
+          grace: '10%',
           grid: { color: '#21262d' },
           ticks: { color: '#7d8590', callback: v => v + '%' },
         },

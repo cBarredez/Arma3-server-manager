@@ -125,6 +125,7 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
               <div class="metric-icon cpu"><i class="fa fa-microchip"></i></div>
               <div>
                 <div class="metric-value" id="m-cpu">—</div>
+                <div class="metric-subvalue" id="m-cpu-detail">—</div>
                 <div class="metric-label">CPU Usage</div>
               </div>
             </div>
@@ -198,28 +199,37 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
           </div>
         </div>
 
-        <div class="card-panel mt-4">
-          <div class="panel-header d-flex justify-content-between align-items-center">
-            <span><i class="fa fa-table-list me-2"></i>Session Metrics</span>
-            <button id="btn-refresh-sessions" class="btn btn-sm btn-outline-secondary" title="Refresh sessions">
-              <i class="fa fa-rotate"></i>
-            </button>
+        <div class="card-panel session-metrics-panel mt-4">
+          <div class="session-panel-heading">
+            <div>
+              <div class="session-panel-kicker">90-DAY TELEMETRY</div>
+              <div class="panel-header mb-0"><i class="fa fa-wave-square me-2"></i>Session Metrics</div>
+            </div>
+            <div class="d-flex gap-2">
+              <button id="btn-open-session-explorer" class="btn btn-sm btn-outline-primary">
+                <i class="fa fa-clock-rotate-left me-1"></i>View history
+              </button>
+              <button id="btn-refresh-sessions" class="btn btn-sm btn-outline-secondary" title="Refresh recent sessions" aria-label="Refresh recent sessions">
+                <i class="fa fa-rotate"></i>
+              </button>
+            </div>
           </div>
-          <div class="small text-muted mt-1 mb-2">CPU and RAM usage recorded per game session. Download a session as CSV.</div>
+          <div class="small text-muted mt-2 mb-3">The 10 newest runs. CPU follows Podman semantics: 100% equals one logical core.</div>
           <div class="table-responsive">
-            <table class="table table-sm table-dark align-middle mb-0">
+            <table class="table table-sm table-dark align-middle mb-0 session-metrics-table">
               <thead>
                 <tr>
                   <th>Started</th>
                   <th>Duration</th>
                   <th>Avg / Peak CPU</th>
-                  <th>Cores</th>
+                  <th>Avg / Peak Cores</th>
                   <th>Avg / Peak RAM</th>
-                  <th></th>
+                  <th>Peak Players / HC</th>
+                  <th><span class="visually-hidden">Actions</span></th>
                 </tr>
               </thead>
               <tbody id="sessions-table-body">
-                <tr><td colspan="6" class="text-muted">Loading...</td></tr>
+                <tr><td colspan="7" class="text-muted">Loading...</td></tr>
               </tbody>
             </table>
           </div>
@@ -564,6 +574,77 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
 
       <div class="modal fade" id="player-detail-modal" tabindex="-1" aria-labelledby="player-detail-title" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content player-detail-modal"><div class="modal-header"><div><div class="log-workspace-kicker">CONNECTION EVIDENCE</div><h5 id="player-detail-title" class="modal-title">Player activity</h5></div><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div id="player-detail-body" class="modal-body"></div></div></div>
+      </div>
+
+      <div class="modal fade" id="session-explorer-modal" tabindex="-1" aria-labelledby="session-explorer-title" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable session-explorer-dialog">
+          <div class="modal-content session-explorer-modal">
+            <div class="modal-header session-explorer-header">
+              <div>
+                <div class="session-panel-kicker">CORRELATED RUN TELEMETRY</div>
+                <h5 id="session-explorer-title" class="modal-title"><i class="fa fa-chart-line me-2"></i>Session Explorer</h5>
+              </div>
+              <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <form id="session-explorer-filters" class="session-filter-deck">
+                <div class="session-quick-ranges" role="group" aria-label="Quick date range">
+                  <button type="button" data-session-range="1">24H</button>
+                  <button type="button" data-session-range="7">7D</button>
+                  <button type="button" data-session-range="30">30D</button>
+                  <button type="button" data-session-range="90" class="active">90D</button>
+                </div>
+                <label><span>From</span><input id="session-filter-from" class="form-control form-control-sm" type="date" /></label>
+                <label><span>To</span><input id="session-filter-to" class="form-control form-control-sm" type="date" /></label>
+                <label><span>Status</span><select id="session-filter-status" class="form-select form-select-sm"><option value="">All</option><option value="running">Live</option><option value="ended">Ended</option></select></label>
+                <label class="session-filter-search"><span>Run ID</span><div class="input-group input-group-sm"><span class="input-group-text"><i class="fa fa-magnifying-glass"></i></span><input id="session-filter-query" class="form-control" maxlength="32" placeholder="Prefix, e.g. 8f2a" /></div></label>
+                <label><span>Order</span><select id="session-filter-sort" class="form-select form-select-sm"><option value="newest">Newest</option><option value="oldest">Oldest</option></select></label>
+                <button type="submit" class="btn btn-sm btn-primary session-filter-apply"><i class="fa fa-filter me-1"></i>Apply</button>
+                <button id="session-filter-reset" type="button" class="btn btn-sm btn-outline-secondary" title="Reset filters" aria-label="Reset session filters"><i class="fa fa-rotate-left"></i></button>
+              </form>
+
+              <div class="session-explorer-workspace">
+                <aside class="session-run-index" aria-label="Matching sessions">
+                  <div class="session-run-index-head"><span>RUN INDEX</span><strong id="session-explorer-count">—</strong></div>
+                  <div id="session-explorer-list" class="session-run-list" aria-live="polite"><div class="session-explorer-message"><i class="fa fa-spinner fa-spin"></i> Loading sessions…</div></div>
+                  <button id="btn-load-more-metric-sessions" class="btn btn-sm btn-outline-secondary w-100 d-none"><i class="fa fa-angles-down me-1"></i>Load more</button>
+                </aside>
+
+                <section class="session-run-detail" aria-live="polite">
+                  <div id="session-detail-empty" class="session-detail-empty">
+                    <i class="fa fa-chart-area"></i>
+                    <strong>Select a run</strong>
+                    <span>CPU, RAM and population will align on the same timeline.</span>
+                  </div>
+                  <div id="session-detail-content" class="d-none">
+                    <div class="session-detail-heading">
+                      <div>
+                        <div id="session-detail-status" class="session-detail-status">ENDED</div>
+                        <h6 id="session-detail-started">—</h6>
+                        <code id="session-detail-run-id">—</code>
+                      </div>
+                      <div class="d-flex gap-2 flex-wrap justify-content-end">
+                        <button id="btn-session-player-activity" class="btn btn-sm btn-outline-primary"><i class="fa fa-users-viewfinder me-1"></i>Player activity</button>
+                        <button id="btn-session-detail-csv" class="btn btn-sm btn-outline-secondary"><i class="fa fa-download me-1"></i>CSV</button>
+                      </div>
+                    </div>
+                    <div class="session-detail-stats">
+                      <div><span>CPU AVG / PEAK</span><strong id="session-stat-cpu">—</strong></div>
+                      <div><span>CORES AVG / PEAK</span><strong id="session-stat-cores">—</strong></div>
+                      <div><span>RAM AVG / PEAK</span><strong id="session-stat-ram">—</strong></div>
+                      <div><span>PLAYERS / HC PEAK</span><strong id="session-stat-population">—</strong></div>
+                    </div>
+                    <div class="session-chart-shell">
+                      <div class="session-chart-title"><span>SESSION TIMELINE</span><small>Hover to inspect a synchronized sample</small></div>
+                      <canvas id="chart-session-detail" height="230" aria-label="Session CPU, RAM, players and headless client history" role="img"></canvas>
+                    </div>
+                    <div id="session-detail-note" class="session-detail-note d-none"><i class="fa fa-circle-info"></i><span></span></div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- ── RCON ───────────────────────────────────────────────── -->
