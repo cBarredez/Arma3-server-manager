@@ -130,9 +130,9 @@ public static class ApiEndpoints
             return Results.Json(new { selected = MissionConfig.ReadSelected(settings.ServerCfg), missions = MissionConfig.List(paths) });
         });
 
-        api.MapPut("/startup/mission", async (MissionSelectionRequest req, RuntimeState runtime) =>
+        api.MapPut("/startup/mission", async (MissionSelectionRequest req, ServerLifecycleCoordinator lifecycle) =>
         {
-            if (runtime.IsRunning) return Results.Json(new { error = "Stop the game server before changing the mission" }, statusCode: 409);
+            if (LifecycleOwnsServer(await lifecycle.GetStatusAsync())) return Results.Json(new { error = "Stop or cancel the game server before changing the mission" }, statusCode: 409);
             var template = req.Template.EndsWith(".pbo", StringComparison.OrdinalIgnoreCase) ? req.Template[..^4] : req.Template;
             var mission = MissionConfig.List(paths).FirstOrDefault(item => item.Template.Equals(template, StringComparison.OrdinalIgnoreCase));
             if (mission is null) return Results.Json(new { error = "Mission not found in mpmissions" }, statusCode: 404);
@@ -141,35 +141,38 @@ public static class ApiEndpoints
             return Results.Json(new { ok = true, selected = mission.Template });
         });
         
-        api.MapGet("/server/status", async (RuntimeState runtime, PlayerActivityService activity) =>
+        api.MapGet("/server/status", async (RuntimeState runtime, ServerLifecycleCoordinator lifecycle, PlayerActivityService activity) =>
         {
             var startup = await store.GetStartupAsync(paths, cfg);
+            var status = await lifecycle.GetStatusAsync();
             var joinHost = !string.IsNullOrWhiteSpace(cfg.PublicJoinHost)
                 ? cfg.PublicJoinHost
                 : Uri.TryCreate(cfg.BaseUrl, UriKind.Absolute, out var baseUri) ? baseUri.Host : "";
-            return Results.Json(new { running = runtime.IsRunning, pid = runtime.ProcessId, runId = runtime.RunId, port = startup.Port, joinHost, headlessClientPids = runtime.HeadlessClientPids, playerTracking = activity.State });
+            return Results.Json(new
+            {
+                status.Phase, status.Running, status.Busy, status.Stage, status.OperationId, status.Since,
+                status.LastError, status.Managed, status.Pid, status.RunId, status.ConflictingPids,
+                port = startup.Port, joinHost, headlessClientPids = runtime.HeadlessClientPids, playerTracking = activity.State
+            });
         });
         
-        api.MapPost("/server/start", async (RuntimeState runtime, PlayerActivityService activity) =>
+        api.MapPost("/server/start", async (RuntimeState runtime, ServerLifecycleCoordinator lifecycle, PlayerActivityService activity) =>
+            await StartServerAsync(cfg, paths, store, runtime, lifecycle, activity));
+
+        api.MapPost("/server/stop", async (ServerLifecycleCoordinator lifecycle, BattlEyeRconClient rcon) =>
         {
-            if (runtime.IsRunning) return Results.Json(new { error = "Server is already running" }, statusCode: 400);
-            return await StartServerAsync(cfg, paths, store, runtime, activity);
+            var result = await lifecycle.StopAsync("stopped");
+            if (!result.Accepted)
+                return Results.Json(new { error = result.Error, code = result.Code, status = result.Status }, statusCode: 409);
+            await rcon.DisconnectAsync();
+            return Results.Json(new { ok = true, status = result.Status });
         });
 
-        api.MapPost("/server/stop", async (RuntimeState runtime, BattlEyeRconClient rcon) =>
+        api.MapPost("/server/restart", async (RuntimeState runtime, ServerLifecycleCoordinator lifecycle, BattlEyeRconClient rcon, PlayerActivityService activity) =>
         {
-            if (!runtime.IsRunning) return Results.Json(new { error = "Server is not running" }, statusCode: 400);
-            await runtime.StopAsync("stopped");
-            await rcon.DisconnectAsync();
-            return Results.Json(new { ok = true });
-        });
-
-        api.MapPost("/server/restart", async (RuntimeState runtime, BattlEyeRconClient rcon, PlayerActivityService activity) =>
-        {
-            if (runtime.IsRunning) await runtime.StopAsync("restarted");
-            await rcon.DisconnectAsync();
-            await Task.Delay(1000);
-            return await StartServerAsync(cfg, paths, store, runtime, activity);
+            var result = await StartServerAsync(cfg, paths, store, runtime, lifecycle, activity, restart: true);
+            if (result is IStatusCodeHttpResult { StatusCode: StatusCodes.Status202Accepted }) await rcon.DisconnectAsync();
+            return result;
         });
 
         api.MapPost("/server/rcon/command", async (RconCommandRequest req, RuntimeState runtime, BattlEyeRconClient rcon) =>
@@ -369,18 +372,18 @@ public static class ApiEndpoints
         
         api.MapGet("/modlists", async () => Results.Json(await store.GetModlistsAsync()));
         api.MapPost("/modlists", async (ModlistSaveRequest req) => Results.Json(await store.SaveModlistAsync(req)));
-        api.MapPut("/modlists/{id}/activate", async (string id, RuntimeState runtime) =>
+        api.MapPut("/modlists/{id}/activate", async (string id, ServerLifecycleCoordinator lifecycle) =>
         {
-            if (runtime.IsRunning) return Results.Json(new { error = "Stop the game server before changing the active modlist" }, statusCode: 409);
+            if (LifecycleOwnsServer(await lifecycle.GetStatusAsync())) return Results.Json(new { error = "Stop or cancel the game server before changing the active modlist" }, statusCode: 409);
             var state = await store.ActivateModlistAsync(id);
             var active = state.Lists.FirstOrDefault(list => list.Id == id);
             if (active is null) return Results.Json(new { error = "Modlist not found" }, statusCode: 404);
             var missing = WithInstallStatus(cfg, active.Mods).Where(mod => !mod.Installed).ToArray();
             return Results.Json(new { state.ActiveModlistId, state.Lists, missing });
         });
-        api.MapPut("/modlists/{id}/deactivate", async (string id, RuntimeState runtime) =>
+        api.MapPut("/modlists/{id}/deactivate", async (string id, ServerLifecycleCoordinator lifecycle) =>
         {
-            if (runtime.IsRunning) return Results.Json(new { error = "Stop the game server before changing the active modlist" }, statusCode: 409);
+            if (LifecycleOwnsServer(await lifecycle.GetStatusAsync())) return Results.Json(new { error = "Stop or cancel the game server before changing the active modlist" }, statusCode: 409);
             var current = await store.GetModlistsAsync();
             if (current.Lists.All(list => list.Id != id)) return Results.Json(new { error = "Modlist not found" }, statusCode: 404);
             if (current.ActiveModlistId != id) return Results.Json(new { error = "Modlist is not active" }, statusCode: 409);
@@ -534,10 +537,10 @@ public static class ApiEndpoints
             return Results.Json(new { ok = true, username = updated.Username });
         });
 
-        api.MapPost("/system/restart", async (RestartAppRequest req, RuntimeState runtime, SteamCmdSession steam, IHostApplicationLifetime lifetime) =>
+        api.MapPost("/system/restart", async (RestartAppRequest req, RuntimeState runtime, ServerLifecycleCoordinator lifecycle, SteamCmdSession steam, IHostApplicationLifetime lifetime) =>
         {
-            if (runtime.IsRunning)
-                return Results.Json(new { error = "Stop the game server before restarting the panel" }, statusCode: 409);
+            if (LifecycleOwnsServer(await lifecycle.GetStatusAsync()))
+                return Results.Json(new { error = "Stop or cancel the game server before restarting the panel" }, statusCode: 409);
             if (runtime.IsMaintenanceBusy || steam.IsRunning)
                 return Results.Json(new { error = "Wait for SteamCMD and maintenance tasks to finish" }, statusCode: 409);
             var auth = await store.GetPanelAuthAsync(cfg);
@@ -554,10 +557,10 @@ public static class ApiEndpoints
             return Results.Json(new { accepted = true, message = "Panel is restarting. This takes a few seconds." }, statusCode: StatusCodes.Status202Accepted);
         });
 
-        api.MapPost("/system/factory-reset", async (FactoryResetRequest req, RuntimeState runtime, SteamCmdSession steam, IHostApplicationLifetime lifetime) =>
+        api.MapPost("/system/factory-reset", async (FactoryResetRequest req, RuntimeState runtime, ServerLifecycleCoordinator lifecycle, SteamCmdSession steam, IHostApplicationLifetime lifetime) =>
         {
-            if (runtime.IsRunning)
-                return Results.Json(new { error = "Stop the game server before factory reset" }, statusCode: 409);
+            if (LifecycleOwnsServer(await lifecycle.GetStatusAsync()))
+                return Results.Json(new { error = "Stop or cancel the game server before factory reset" }, statusCode: 409);
             if (runtime.IsMaintenanceBusy || steam.IsRunning)
                 return Results.Json(new { error = "Wait for SteamCMD and maintenance tasks to finish" }, statusCode: 409);
             var auth = await store.GetPanelAuthAsync(cfg);
@@ -628,6 +631,8 @@ public static class ApiEndpoints
             ? $"steam:{steamId}"
             : http.Session.GetString("authMethod") ?? "panel";
     }
+
+    static bool LifecycleOwnsServer(ServerLifecycleStatus status) => status.Phase is not ("stopped" or "faulted");
     
     static async ValueTask<object?> AuthFilter(EndpointFilterInvocationContext ctx, EndpointFilterDelegate next)
     {
@@ -758,10 +763,12 @@ public static class ApiEndpoints
 
     static async Task<List<PresetMod>> DownloadWorkshopModsWithRetriesAsync(
         AppConfig cfg, SqliteStore store, ServerPaths paths, RuntimeState runtime, SteamAuth? auth,
-        IReadOnlyCollection<PresetMod> requested, string kind)
+        IReadOnlyCollection<PresetMod> requested, string kind, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var mods = requested.GroupBy(mod => mod.WorkshopId).Select(group => group.First()).ToList();
         var initial = await runtime.RunTaskCaptureAsync(paths.SteamCmd, WorkshopDownloadArgs(cfg, auth, mods), $"{kind}:{mods.Count}");
+        cancellationToken.ThrowIfCancellationRequested();
         var failed = FailedWorkshopMods(cfg, mods, initial);
         await FinalizeWorkshopModsAsync(cfg, store, mods.Where(mod => failed.All(item => item.WorkshopId != mod.WorkshopId)));
 
@@ -773,8 +780,9 @@ public static class ApiEndpoints
             for (var attempt = 0; attempt < delays.Length; attempt++)
             {
                 runtime.Push("system", $"Workshop {mod.WorkshopId} retry {attempt + 1}/{delays.Length} in {delays[attempt]}s");
-                await Task.Delay(TimeSpan.FromSeconds(delays[attempt]));
+                await Task.Delay(TimeSpan.FromSeconds(delays[attempt]), cancellationToken);
                 var result = await runtime.RunTaskCaptureAsync(paths.SteamCmd, WorkshopDownloadArgs(cfg, auth, [mod]), $"{kind}:retry:{mod.WorkshopId}:{attempt + 1}");
+                cancellationToken.ThrowIfCancellationRequested();
                 if (FailedWorkshopMods(cfg, [mod], result).Count != 0) continue;
                 await FinalizeWorkshopModsAsync(cfg, store, [mod]);
                 runtime.Push("system", $"Workshop {mod.WorkshopId} downloaded successfully after retry {attempt + 1}");
@@ -842,7 +850,14 @@ public static class ApiEndpoints
     // so the HTTP request returns immediately instead of blocking until it's done. Previously the whole
     // sequence ran inline, and browsers/reverse proxies would drop the connection (499) long before it
     // finished, making the panel look hung even though the start was still progressing server-side.
-    static async Task<IResult> StartServerAsync(AppConfig cfg, ServerPaths paths, SqliteStore store, RuntimeState runtime, PlayerActivityService activity)
+    static async Task<IResult> StartServerAsync(
+        AppConfig cfg,
+        ServerPaths paths,
+        SqliteStore store,
+        RuntimeState runtime,
+        ServerLifecycleCoordinator lifecycle,
+        PlayerActivityService activity,
+        bool restart = false)
     {
         var startup = await store.GetStartupAsync(paths, cfg);
         var bin = Path.Combine(cfg.Arma3Dir, startup.ServerBinary);
@@ -858,59 +873,68 @@ public static class ApiEndpoints
             if (!SteamCmdSession.HasCachedLogin(user)) return SteamLoginRequired(user);
         }
 
-        _ = Task.Run(async () =>
+        var reservation = restart
+            ? await lifecycle.TryBeginRestartAsync()
+            : await lifecycle.TryBeginStartAsync();
+        if (!reservation.Accepted || reservation.OperationId is null)
+            return Results.Json(new
+            {
+                error = restart ? "Server cannot be restarted in its current state" : "A server start or active session already exists",
+                code = "server_lifecycle_conflict",
+                status = reservation.Status
+            }, statusCode: 409);
+
+        var operationId = reservation.OperationId;
+        lifecycle.QueueStart(operationId, async cancellationToken =>
         {
-            try
+            cancellationToken.ThrowIfCancellationRequested();
+            if (workshopMods.Count > 0)
             {
-                if (workshopMods.Count > 0)
+                if (!await lifecycle.SetStartStageAsync(operationId, "preparing", "updating_mods"))
+                    throw new OperationCanceledException(cancellationToken);
+                runtime.Push("system", $"Checking updates for {workshopMods.Count} active Workshop mods before server start");
+                var checking = workshopMods.Select(mod => new PresetMod(mod.Name, mod.WorkshopId!)).ToList();
+                var failed = await DownloadWorkshopModsWithRetriesAsync(cfg, store, paths, runtime, auth, checking, "mods:startup-check", cancellationToken);
+                if (failed.Count > 0)
                 {
-                    runtime.Push("system", $"Checking updates for {workshopMods.Count} active Workshop mods before server start");
-                    var checking = workshopMods.Select(mod => new PresetMod(mod.Name, mod.WorkshopId!)).ToList();
-                    var failed = await DownloadWorkshopModsWithRetriesAsync(cfg, store, paths, runtime, auth, checking, "mods:startup-check");
-                    if (failed.Count > 0)
-                    {
-                        runtime.Push("stderr", $"Server start aborted: SteamCMD could not update {string.Join(", ", failed.Select(mod => mod.WorkshopId))}. Review Server Logs and try again.");
-                        return;
-                    }
-                    runtime.Push("system", "Active Workshop mods are current and storage is optimized");
+                    throw new InvalidOperationException($"SteamCMD could not update {string.Join(", ", failed.Select(mod => mod.WorkshopId))}. Review Server Logs and try again.");
                 }
-                else
-                {
-                    WorkshopStorage.RepairDuplicates(cfg);
-                    await store.NormalizeWorkshopModPathsAsync(cfg);
-                }
-
-                var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
-                var lowercased = ModFileRepair.MakeLowercase(mods);
-                if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
-                await ServerCfgWriter.ApplyAsync(startup);
-                await BattlEyeConfigWriter.ApplyAsync(startup, cfg);
-                var instrumentation = await ServerCfgInstrumentation.ApplyAsync(startup.ServerCfg);
-                activity.ReportInstrumentation(instrumentation);
-                activity.ConfigureForRun(!startup.DisableBattleEye);
-                if (!instrumentation.Complete)
-                    runtime.Push("stderr", $"Player tracking is partial: {string.Join("; ", instrumentation.Errors)}");
-                runtime.Start(bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir, startup.ProfilesDir);
-
-                if (startup.HeadlessClients > 0)
-                {
-                    // Give the main server a moment to bind its port before HCs try to connect; they still
-                    // auto-retry on failure, but starting them immediately just wastes the first attempt.
-                    await Task.Delay(3000);
-                    for (var i = 1; i <= startup.HeadlessClients; i++)
-                    {
-                        var hcProfileDir = Path.Combine(startup.ProfilesDir, $"hc{i}");
-                        Directory.CreateDirectory(hcProfileDir);
-                        runtime.StartHeadlessClient(bin, CommandBuilder.HeadlessClientArgs(paths, startup, mods, i, hcProfileDir), cfg.Arma3Dir, i);
-                    }
-                }
+                runtime.Push("system", "Active Workshop mods are current and storage is optimized");
             }
-            catch (Exception exception)
+            else
             {
-                runtime.Push("stderr", $"Server start failed: {exception.Message}");
+                WorkshopStorage.RepairDuplicates(cfg);
+                await store.NormalizeWorkshopModPathsAsync(cfg);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!await lifecycle.SetStartStageAsync(operationId, "preparing", "configuring"))
+                throw new OperationCanceledException(cancellationToken);
+            var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
+            var lowercased = ModFileRepair.MakeLowercase(mods);
+            if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
+            await ServerCfgWriter.ApplyAsync(startup);
+            await BattlEyeConfigWriter.ApplyAsync(startup, cfg);
+            var instrumentation = await ServerCfgInstrumentation.ApplyAsync(startup.ServerCfg);
+            activity.ReportInstrumentation(instrumentation);
+            activity.ConfigureForRun(!startup.DisableBattleEye);
+            if (!instrumentation.Complete)
+                runtime.Push("stderr", $"Player tracking is partial: {string.Join("; ", instrumentation.Errors)}");
+            cancellationToken.ThrowIfCancellationRequested();
+            await lifecycle.LaunchAsync(operationId, bin, CommandBuilder.Args(paths, startup, mods), cfg.Arma3Dir, startup.ProfilesDir);
+
+            if (startup.HeadlessClients > 0)
+            {
+                await Task.Delay(3000, cancellationToken);
+                for (var i = 1; i <= startup.HeadlessClients; i++)
+                {
+                    var hcProfileDir = Path.Combine(startup.ProfilesDir, $"hc{i}");
+                    Directory.CreateDirectory(hcProfileDir);
+                    lifecycle.StartHeadlessClient(bin, CommandBuilder.HeadlessClientArgs(paths, startup, mods, i, hcProfileDir), cfg.Arma3Dir, i);
+                }
             }
         });
 
-        return Results.Json(new { accepted = true, checkedMods = workshopMods.Count }, statusCode: StatusCodes.Status202Accepted);
+        return Results.Json(new { accepted = true, checkedMods = workshopMods.Count, status = reservation.Status }, statusCode: StatusCodes.Status202Accepted);
     }
 }
