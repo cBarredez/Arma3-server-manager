@@ -32,6 +32,7 @@ public sealed class PlayerActivityService : BackgroundService
     string? lastError;
     long dropped;
     volatile bool battleEyeEnabled;
+    int? activePlayerCount;
 
     public PlayerActivityService(ILogger<PlayerActivityService> logger, AppConfig config, RuntimeState runtime, LogHub logHub, BattlEyeRconClient rcon, SqliteStore store)
     {
@@ -65,10 +66,20 @@ public sealed class PlayerActivityService : BackgroundService
         }
     }
 
+    /// <summary>Current human RCon roster size, or null when RCon cannot provide an authoritative observation.</summary>
+    public int? ActivePlayerCount
+    {
+        get { lock (roster) return activePlayerCount; }
+    }
+
     public void ConfigureForRun(bool enableBattleEye)
     {
         battleEyeEnabled = enableBattleEye;
-        lock (roster) roster.Clear();
+        lock (roster)
+        {
+            roster.Clear();
+            activePlayerCount = null;
+        }
         lock (stateGate)
         {
             sources.Clear();
@@ -141,7 +152,11 @@ public sealed class PlayerActivityService : BackgroundService
                 case ServerRunEnded ended:
                     await FlushSignalsAsync(signals);
                     await store.EndServerSessionAsync(ended);
-                    lock (roster) roster.Clear();
+                    lock (roster)
+                    {
+                        roster.Clear();
+                        activePlayerCount = null;
+                    }
                     break;
                 case LogEntry entry when PlayerSignalParser.TryParse(entry, out var signal):
                     signals.Add(signal!);
@@ -178,7 +193,11 @@ public sealed class PlayerActivityService : BackgroundService
             if (!runtime.IsRunning || runtime.RunId is null)
             {
                 failures = 0;
-                lock (roster) roster.Clear();
+                lock (roster)
+                {
+                    roster.Clear();
+                    activePlayerCount = null;
+                }
                 if (rcon.IsConnected) await rcon.DisconnectAsync();
                 await Task.Delay(TimeSpan.FromSeconds(1), ct);
                 continue;
@@ -186,7 +205,11 @@ public sealed class PlayerActivityService : BackgroundService
             if (!battleEyeEnabled)
             {
                 failures = 0;
-                lock (roster) roster.Clear();
+                lock (roster)
+                {
+                    roster.Clear();
+                    activePlayerCount = null;
+                }
                 if (rcon.IsConnected) await rcon.DisconnectAsync();
                 lock (stateGate)
                     if (lastError?.Contains("RCon", StringComparison.OrdinalIgnoreCase) == true) lastError = null;
@@ -195,6 +218,7 @@ public sealed class PlayerActivityService : BackgroundService
             }
             if (!rcon.IsConfigured)
             {
+                lock (roster) activePlayerCount = null;
                 lock (stateGate) lastError = "BattlEye RCon is not configured";
                 await Task.Delay(TimeSpan.FromSeconds(5), ct);
                 continue;
@@ -216,6 +240,7 @@ public sealed class PlayerActivityService : BackgroundService
             catch (Exception exception)
             {
                 failures++;
+                lock (roster) activePlayerCount = null;
                 lock (stateGate) lastError = $"RCon: {exception.Message}";
                 await Task.Delay(TimeSpan.FromSeconds(delays[Math.Min(failures - 1, delays.Length - 1)]), ct);
             }
@@ -247,6 +272,7 @@ public sealed class PlayerActivityService : BackgroundService
             }
             roster.Clear();
             foreach (var pair in current) roster[pair.Key] = pair.Value;
+            activePlayerCount = current.Count;
         }
     }
 

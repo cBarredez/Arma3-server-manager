@@ -8,14 +8,14 @@ using Arma3Manager.Api.Infrastructure.Persistence;
 namespace Arma3Manager.Api.Infrastructure;
 
 /// <summary>Cached CPU and temperature values exposed by the metrics endpoint.</summary>
-public sealed record CpuMetrics(double? Load, double[] Cores);
+public sealed record CpuMetrics(double? Load, double[] Cores, double? UsagePercent = null, double? CoresUsed = null, double Capacity = 1);
 public sealed record HostMetricsSample(CpuMetrics Cpu, double? Temperature);
 public sealed record MemoryMetrics(long Total, long Used, long Free, long Cache, long Current, double Percent);
 
 /// <summary>Samples cumulative cgroup counters independently from HTTP polling, and — while a game session is
 /// running — records a lower-frequency history of those samples per RunId so CPU/RAM usage for a match can be
 /// reviewed or exported after the fact (issue: "Añadir métricas solicitadas").</summary>
-public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState runtime, SqliteStore store, AppConfig config) : BackgroundService
+public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState runtime, PlayerActivityService activity, SqliteStore store, AppConfig config) : BackgroundService
 {
     static readonly TimeSpan Interval = TimeSpan.FromSeconds(1);
     static readonly TimeSpan PersistInterval = TimeSpan.FromSeconds(5);
@@ -39,15 +39,19 @@ public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState 
                 var usage = MetricsReader.ReadCpuUsageMicroseconds();
                 var timestamp = Stopwatch.GetTimestamp();
                 var capacity = MetricsReader.ReadCpuCapacity();
-                var load = previousUsage.HasValue && usage.HasValue
-                    ? MetricsReader.CalculateCpuLoad(previousUsage.Value, usage.Value, Stopwatch.GetElapsedTime(previousTimestamp, timestamp), capacity)
+                var elapsed = Stopwatch.GetElapsedTime(previousTimestamp, timestamp);
+                var usagePercent = previousUsage.HasValue && usage.HasValue
+                    ? MetricsReader.CalculateCpuUsagePercent(previousUsage.Value, usage.Value, elapsed)
+                    : null;
+                var load = usagePercent.HasValue
+                    ? MetricsReader.NormalizeCpuLoad(usagePercent.Value, capacity)
                     : null;
 
-                Volatile.Write(ref current, new HostMetricsSample(new CpuMetrics(load, []), MetricsReader.ReadCpuTemperature()));
+                Volatile.Write(ref current, new HostMetricsSample(new CpuMetrics(load, [], usagePercent, usagePercent / 100d, capacity), MetricsReader.ReadCpuTemperature()));
                 previousUsage = usage;
                 previousTimestamp = timestamp;
 
-                await PersistIfDueAsync(load, capacity);
+                await PersistIfDueAsync(load, usagePercent, capacity);
             }
             catch (Exception exception)
             {
@@ -59,7 +63,7 @@ public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState 
         }
     }
 
-    async Task PersistIfDueAsync(double? load, double capacity)
+    async Task PersistIfDueAsync(double? load, double? usagePercent, double capacity)
     {
         if (!runtime.IsRunning || runtime.RunId is null) return;
         var now = DateTime.UtcNow;
@@ -69,7 +73,16 @@ public sealed class MetricsSampler(ILogger<MetricsSampler> logger, RuntimeState 
         try
         {
             var memory = MetricsReader.ReadMemory();
-            await store.InsertMetricsSampleAsync(new MetricsSample(runtime.RunId, DateTimeOffset.UtcNow, load, capacity, memory.Used, memory.Percent));
+            await store.InsertMetricsSampleAsync(new MetricsSample(
+                runtime.RunId,
+                DateTimeOffset.UtcNow,
+                load,
+                capacity,
+                memory.Used,
+                memory.Percent,
+                usagePercent,
+                activity.ActivePlayerCount,
+                runtime.HeadlessClientPids.Length));
         }
         catch (Exception exception)
         {
@@ -162,11 +175,25 @@ public static class MetricsReader
 
     public static double? CalculateCpuLoad(long previousUsageMicroseconds, long currentUsageMicroseconds, TimeSpan elapsed, double capacity)
     {
+        var usagePercent = CalculateCpuUsagePercent(previousUsageMicroseconds, currentUsageMicroseconds, elapsed);
+        return usagePercent.HasValue ? NormalizeCpuLoad(usagePercent.Value, capacity) : null;
+    }
+
+    /// <summary>Podman-compatible CPU usage where 100% equals one logical CPU worth of time.</summary>
+    public static double? CalculateCpuUsagePercent(long previousUsageMicroseconds, long currentUsageMicroseconds, TimeSpan elapsed)
+    {
         var usageDelta = currentUsageMicroseconds - previousUsageMicroseconds;
-        if (usageDelta < 0 || elapsed <= TimeSpan.Zero || capacity <= 0 || !double.IsFinite(capacity)) return null;
-        var availableMicroseconds = elapsed.TotalMilliseconds * 1000d * capacity;
-        if (availableMicroseconds <= 0 || !double.IsFinite(availableMicroseconds)) return null;
-        return Math.Clamp(Math.Round(usageDelta * 100d / availableMicroseconds, 1), 0, 100);
+        if (usageDelta < 0 || elapsed <= TimeSpan.Zero) return null;
+        var elapsedMicroseconds = elapsed.TotalMilliseconds * 1000d;
+        if (elapsedMicroseconds <= 0 || !double.IsFinite(elapsedMicroseconds)) return null;
+        var percent = usageDelta * 100d / elapsedMicroseconds;
+        return double.IsFinite(percent) ? Math.Round(percent, 1) : null;
+    }
+
+    public static double? NormalizeCpuLoad(double usagePercent, double capacity)
+    {
+        if (usagePercent < 0 || !double.IsFinite(usagePercent) || capacity <= 0 || !double.IsFinite(capacity)) return null;
+        return Math.Clamp(Math.Round(usagePercent / capacity, 1), 0, 100);
     }
 
     public static double? ReadCpuTemperature(params string[] sysRoots)
