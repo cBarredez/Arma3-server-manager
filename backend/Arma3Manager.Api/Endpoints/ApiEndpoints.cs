@@ -429,6 +429,14 @@ public static class ApiEndpoints
             if (info.Length > 2 * 1024 * 1024) return Results.Json(new { error = "File too large to edit (>2 MB)" }, statusCode: 400);
             return Results.Json(new { path = PathGuard.Relative(cfg.Arma3Dir, file), content = await File.ReadAllTextAsync(file) });
         });
+        api.MapGet("/files/download", (string path) =>
+        {
+            var file = PathGuard.Resolve(cfg.Arma3Dir, path);
+            if (Directory.Exists(file)) return Results.Json(new { error = "Path is a directory" }, statusCode: 400);
+            if (!File.Exists(file)) return Results.Json(new { error = "File not found" }, statusCode: 404);
+            if (ProtectedFiles.IsProtected(PathGuard.Relative(cfg.Arma3Dir, file))) return Results.Json(new { error = "Protected file" }, statusCode: 403);
+            return Results.File(file, "application/octet-stream", Path.GetFileName(file), enableRangeProcessing: true);
+        });
         api.MapPut("/files/content", async (FileWriteRequest req) =>
         {
             var file = PathGuard.Resolve(cfg.Arma3Dir, req.Path);

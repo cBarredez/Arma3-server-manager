@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(git -C \"c:\\\\Users\\\\sword\\\\OneDrive\\\\Documentos\\\\arma\\\\arma_server\" diff --stat)",
-      "Bash(git -C \"c:\\\\Users\\\\sword\\\\OneDrive\\\\Documentos\\\\arma\\\\arma_server\" diff web/src/scripts/app.js)"
+      "Bash(git -C \"c:\\\\Users\\\\sword\\\\OneDrive\\\\Documentos\\\\arma\\\\arma_server\" diff web/src/scripts/app.js)",
+      "Bash(dotnet build *)"
     ]
   }
 }
