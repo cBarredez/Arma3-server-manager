@@ -1103,7 +1103,7 @@ html, body {
 .file-table .file-item { display: table-row; }
 .file-table .file-date-col { width: 190px; }
 .file-table .file-size-col { width: 110px; }
-.file-table .file-actions-col { width: 132px; }
+.file-table .file-actions-col { width: 168px; }
 .file-table td:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1112,12 +1112,20 @@ html, body {
 .file-table td:nth-child(2),
 .file-table td:nth-child(3),
 .file-table td:nth-child(4) { white-space: nowrap; }
+/* Every row renders all 4 action slots (Edit/Download/Rename/Delete);
+   directories get invisible placeholders for Edit/Download instead of
+   omitting them, so the same icon always lands in the same column. */
 .file-table .file-item .fi-actions {
-  display: table-cell;
-  text-align: right;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: .3rem;
   white-space: nowrap;
 }
-.file-table .fi-actions .btn + .btn { margin-left: .3rem; }
+.file-table .fi-action-placeholder {
+  visibility: hidden;
+  pointer-events: none;
+}
 
 /* Breadcrumb */
 .breadcrumb { background: none; padding: 0; margin: 0; }

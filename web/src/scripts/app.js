@@ -1888,8 +1888,12 @@ function renderFileTable(items, currentPath) {
         <td>${fmtDate(item.modified)}</td>
         <td>${fmtBytes(item.size)}</td>
         <td class="fi-actions">
-          ${!item.isDir ? `<button class="btn btn-sm btn-outline-secondary btn-icon" data-edit="${escAttr(item.path)}" title="Edit"><i class="fa fa-pen-to-square"></i></button>` : ''}
-          ${!item.isDir ? `<a class="btn btn-sm btn-outline-secondary btn-icon" href="${escAttr(apiUrl('/api/files/download?path=' + encodeURIComponent(item.path)))}" download="${escAttr(item.name)}" title="Download"><i class="fa fa-download"></i></a>` : ''}
+          ${!item.isDir
+            ? `<button class="btn btn-sm btn-outline-secondary btn-icon" data-edit="${escAttr(item.path)}" title="Edit"><i class="fa fa-pen-to-square"></i></button>`
+            : `<span class="btn btn-sm btn-icon fi-action-placeholder" aria-hidden="true"><i class="fa fa-pen-to-square"></i></span>`}
+          ${!item.isDir
+            ? `<a class="btn btn-sm btn-outline-secondary btn-icon" href="${escAttr(apiUrl('/api/files/download?path=' + encodeURIComponent(item.path)))}" download="${escAttr(item.name)}" title="Download"><i class="fa fa-download"></i></a>`
+            : `<span class="btn btn-sm btn-icon fi-action-placeholder" aria-hidden="true"><i class="fa fa-download"></i></span>`}
           <button class="btn btn-sm btn-outline-secondary btn-icon" data-rename="${escAttr(item.path)}" data-name="${escAttr(item.name)}" title="Rename"><i class="fa fa-pencil"></i></button>
           <button class="btn btn-sm btn-outline-danger btn-icon" data-del="${escAttr(item.path)}" title="Delete"><i class="fa fa-trash"></i></button>
         </td>
