@@ -1714,6 +1714,22 @@ function showPresetPreview(mods, savedPath = '') {
     list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
   };
 
+  // Requires a modlist name before saving — installing a preset without
+  // naming it is exactly how a modlist used to go unsaved, so both save
+  // paths (the explicit button and installing) funnel through this.
+  async function saveCurrentModlist(selected) {
+    const nameInput = document.getElementById('preset-save-name');
+    const name = nameInput.value.trim();
+    if (!name) {
+      nameInput.focus();
+      toast('Enter a name for this modlist before continuing', 'warning');
+      return null;
+    }
+    const saved = await POST('/api/modlists', { name, mods: selected });
+    loadModlists();
+    return saved;
+  }
+
   document.getElementById('btn-save-modlist').onclick = async () => {
     const selected = [...list.querySelectorAll('input:checked')].map(cb => ({
       workshopId: cb.dataset.workshopId,
@@ -1721,12 +1737,8 @@ function showPresetPreview(mods, savedPath = '') {
     }));
     if (!selected.length) { toast('No mods selected', 'warning'); return; }
     try {
-      const saved = await POST('/api/modlists', {
-        name: document.getElementById('preset-save-name').value.trim(),
-        mods: selected,
-      });
-      toast(`Modlist saved: ${saved.name}`);
-      loadModlists();
+      const saved = await saveCurrentModlist(selected);
+      if (saved) toast(`Modlist saved: ${saved.name}`);
     } catch (e) { toast(e.message, 'error'); }
   };
 
@@ -1737,8 +1749,10 @@ function showPresetPreview(mods, savedPath = '') {
     }));
     if (!selected.length) { toast('No mods selected', 'warning'); return; }
     try {
+      const saved = await saveCurrentModlist(selected);
+      if (!saved) return; // no name entered — user was prompted, don't install without saving
       const { queued, alreadyInstalled } = await POST('/api/mods/install-batch', { mods: selected });
-      toast(queued ? `${queued} missing mods queued; ${alreadyInstalled || 0} already installed` : 'All selected mods are already installed');
+      toast(`Modlist saved: ${saved.name}. ${queued ? `${queued} missing mods queued; ${alreadyInstalled || 0} already installed` : 'All selected mods are already installed'}`);
       panel.classList.add('d-none');
     } catch (e) { handleSteamLoginRequired(e); }
   };
