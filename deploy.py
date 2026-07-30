@@ -190,10 +190,28 @@ def ensure_runtime(target: Target) -> None:
         remote(target, ["podman", "secret", "create", "--replace", PODMAN_SECRET, secret_file])
 
 
+def git_commit() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
 def build_image(target: Target, remote_dir: str, release: str, service: str) -> str:
     image = f"localhost/arma3-manager-{service}:{release}"
     containerfile = "Containerfile.api" if service == "api" else "Containerfile.frontend"
-    remote(target, ["podman", "build", "--file", f"{remote_dir}/{containerfile}", "--tag", image, remote_dir])
+    build_date = datetime.now(timezone.utc).isoformat()
+    remote(
+        target,
+        [
+            "podman", "build",
+            "--build-arg", f"GIT_COMMIT={git_commit()}",
+            "--build-arg", f"BUILD_DATE={build_date}",
+            "--file", f"{remote_dir}/{containerfile}", "--tag", image, remote_dir,
+        ],
+    )
     return image
 
 

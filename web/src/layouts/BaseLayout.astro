@@ -21,8 +21,25 @@ const { title } = Astro.props;
   </head>
   <body>
     <slot />
+    <div id="version-badge" class="version-badge" style="display:none"></div>
     <script>
       import '../scripts/runtime.js';
+    </script>
+    <script is:inline>
+      (function () {
+        var API_BASE = (window.ARMA3_API_BASE || '').replace(/\/$/, '');
+        fetch(API_BASE + '/api/health', { credentials: API_BASE ? 'include' : 'same-origin' })
+          .then(function (res) { return res.json(); })
+          .then(function (data) {
+            var el = document.getElementById('version-badge');
+            if (!el || !data || !data.commit) return;
+            var commit = data.commit === 'unknown' ? 'unknown' : data.commit.slice(0, 10);
+            el.textContent = commit;
+            el.title = 'commit ' + data.commit + (data.buildDate ? '\nbuilt ' + data.buildDate : '');
+            el.style.display = '';
+          })
+          .catch(function () {});
+      })();
     </script>
   </body>
 </html>

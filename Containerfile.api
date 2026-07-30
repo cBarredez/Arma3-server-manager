@@ -9,6 +9,14 @@ RUN dotnet publish backend/Arma3Manager.Api/Arma3Manager.Api.csproj -c Release -
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 LABEL project=arma3-manager
 
+# Populated by the build invocation (deploy.py / podman-compose / the hub) so
+# the running panel can show which commit it was built from; "unknown" if
+# whoever built the image didn't pass them.
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
+ENV BUILD_DATE=${BUILD_DATE}
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV STEAMCMD_DIR=/steamcmd
 ENV ARMA3_DIR=/arma3

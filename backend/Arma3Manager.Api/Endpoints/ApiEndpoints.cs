@@ -19,7 +19,14 @@ public static class ApiEndpoints
     /// <summary>Maps all existing API routes without changing their public contracts.</summary>
     public static void MapApiEndpoints(this WebApplication app, AppConfig cfg, ServerPaths paths, SqliteStore store)
     {
-        app.MapGet("/api/health", () => Results.Json(new { status = "ok", backend = "dotnet-kestrel", sqlite = store.DbPath }));
+        app.MapGet("/api/health", () => Results.Json(new
+        {
+            status = "ok",
+            backend = "dotnet-kestrel",
+            sqlite = store.DbPath,
+            commit = Environment.GetEnvironmentVariable("GIT_COMMIT") ?? "unknown",
+            buildDate = Environment.GetEnvironmentVariable("BUILD_DATE") ?? "unknown",
+        }));
         
         app.MapPost("/api/auth/login", async (HttpContext http, LoginRequest req) =>
         {

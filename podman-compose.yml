@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Containerfile.api
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     image: localhost/arma3-manager-api:latest
     container_name: arma3-api
     restart: unless-stopped
