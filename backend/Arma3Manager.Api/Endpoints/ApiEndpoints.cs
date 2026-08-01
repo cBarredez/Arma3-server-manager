@@ -924,8 +924,11 @@ public static class ApiEndpoints
             if (!await lifecycle.SetStartStageAsync(operationId, "preparing", "configuring"))
                 throw new OperationCanceledException(cancellationToken);
             var mods = (await store.GetActiveCreatorDlcPathsAsync(cfg)).Concat(await store.GetActiveModsAsync()).ToList();
-            var lowercased = ModFileRepair.MakeLowercase(mods);
-            if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
+            if (startup.LowerCaseMods)
+            {
+                var lowercased = ModFileRepair.MakeLowercase(mods);
+                if (lowercased > 0) runtime.Push("system", $"Repaired {lowercased} uppercase mod file/folder names before start");
+            }
             await ServerCfgWriter.ApplyAsync(startup);
             await BattlEyeConfigWriter.ApplyAsync(startup, cfg);
             var instrumentation = await ServerCfgInstrumentation.ApplyAsync(startup.ServerCfg);
