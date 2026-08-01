@@ -53,14 +53,10 @@ public sealed record StartupSettings(string ServerBinary, string Ip, int Port, s
         HeadlessClients = Math.Clamp(HeadlessClients, 0, 5)
     };
 
-    // LowerCaseMods defaults to true (unlike the other four bools): the Linux
-    // Arma runtime this project targets needs case-normalized mod paths to
-    // load correctly, so a fresh instance should get that repair without
-    // requiring anyone to find and flip the setting first.
     public static StartupSettings Default(ServerPaths paths, AppConfig cfg) => new(
         "arma3server_x64", "0.0.0.0", cfg.ServerPort, paths.ProfilesDir,
         Path.Combine(paths.ConfigDir, "server.cfg"), Path.Combine(paths.ConfigDir, "basic.cfg"),
         "-autoInit -preload -limitFPS=120 -bandwidthAlg=2 -maxFileCacheSize -noSound", cfg.ServerMaxPlayers, "",
-        AutomaticUpdates: false, DownloadCreatorDlcs: false, LowerCaseMods: true, ValidateServerFiles: false, DisableBattleEye: false,
+        AutomaticUpdates: false, DownloadCreatorDlcs: false, LowerCaseMods: false, ValidateServerFiles: false, DisableBattleEye: false,
         ServerMods: "", OptionalClientMods: "", ExtraPorts: [], HeadlessClients: 0, SteamCmdFlags: "");
 }
