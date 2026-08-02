@@ -1789,6 +1789,66 @@ async function loadFiles(dir, pushHistory = false, refresh = false) {
   };
   document.getElementById('btn-refresh-files').onclick = () => loadFiles(state.currentFilePath, false, true);
   initFileDropZone();
+  initFileSearch();
+}
+
+let fileSearchDebounce = null;
+
+function initFileSearch() {
+  const input = document.getElementById('file-search-input');
+  const results = document.getElementById('file-search-results');
+  if (!input || input.dataset.ready === 'true') return;
+  input.dataset.ready = 'true';
+
+  const hideResults = () => { results.classList.add('d-none'); results.innerHTML = ''; };
+
+  input.addEventListener('input', () => {
+    clearTimeout(fileSearchDebounce);
+    const q = input.value.trim();
+    if (!q) { hideResults(); return; }
+    fileSearchDebounce = setTimeout(async () => {
+      try {
+        const { items } = await GET(`/api/files/search?q=${encodeURIComponent(q)}`);
+        renderFileSearchResults(items, results);
+      } catch (e) { toast(e.message, 'error'); }
+    }, 250);
+  });
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { input.value = ''; hideResults(); input.blur(); }
+  });
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#file-search-input') && !e.target.closest('#file-search-results')) hideResults();
+  });
+}
+
+function renderFileSearchResults(items, container) {
+  if (!items.length) {
+    container.innerHTML = '<div class="file-search-empty text-muted">No matches</div>';
+    container.classList.remove('d-none');
+    return;
+  }
+  container.innerHTML = items.map(item => `
+    <div class="file-search-result" data-path="${escAttr(item.path)}" data-is-dir="${item.isDir}">
+      <i class="fa fa-${item.isDir ? 'folder' : getFileIcon(item.name)} me-2"></i>
+      <span class="fsr-name">${escHtml(item.name)}</span>
+      <span class="fsr-path text-muted">${escHtml(item.path)}</span>
+    </div>
+  `).join('');
+  container.classList.remove('d-none');
+
+  container.querySelectorAll('.file-search-result').forEach(el => {
+    el.addEventListener('click', () => {
+      const path = el.dataset.path;
+      const isDir = el.dataset.isDir === 'true';
+      document.getElementById('file-search-input').value = '';
+      container.classList.add('d-none');
+      container.innerHTML = '';
+      if (isDir) loadFiles(path, true);
+      else openFileEditor(path);
+    });
+  });
 }
 
 function renderCurrentFileView() {
@@ -1978,6 +2038,12 @@ async function mountCodeEditor(hostId, value, filename) {
   return syntaxEditorModule.mountSyntaxEditor(document.getElementById(hostId), value, filename);
 }
 
+function closeFileEditor() {
+  document.getElementById('file-editor-panel').classList.add('d-none');
+  fileCodeEditor?.destroy();
+  fileCodeEditor = null;
+}
+
 async function openFileEditor(filePath) {
   const panel = document.getElementById('file-editor-panel');
   try {
@@ -1989,12 +2055,22 @@ async function openFileEditor(filePath) {
     fileCodeEditor = await mountCodeEditor('file-editor', content, filename);
     fileCodeEditor.focus();
 
+    const saveFile = () => PUT('/api/files/content', { path: filePath, content: fileCodeEditor.getValue() });
+
     document.getElementById('btn-save-file').onclick = async () => {
       try {
-        await PUT('/api/files/content', { path: filePath, content: fileCodeEditor.getValue() });
+        await saveFile();
         toast('File saved');
       } catch (e) { toast(e.message, 'error'); }
     };
+    document.getElementById('btn-save-close-file').onclick = async () => {
+      try {
+        await saveFile();
+        toast('File saved');
+        closeFileEditor();
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    document.getElementById('btn-close-file').onclick = () => closeFileEditor();
   } catch (e) { toast(e.message, 'error'); }
 }
 

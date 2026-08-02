@@ -427,6 +427,11 @@ public static class ApiEndpoints
             }
             return Results.Json(new { path = rel, rootName = "Arma 3 Server", items });
         });
+        api.MapGet("/files/search", async (string? q) =>
+        {
+            if (string.IsNullOrWhiteSpace(q)) return Results.Json(new { items = Array.Empty<FileItem>() });
+            return Results.Json(new { items = await store.SearchFileIndexAsync(q.Trim()) });
+        });
         api.MapGet("/files/content", async (string path) =>
         {
             var file = PathGuard.Resolve(cfg.Arma3Dir, path);

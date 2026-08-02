@@ -1125,6 +1125,28 @@ public sealed class SqliteStore(string dbPath)
         return items.ToArray();
     }
 
+    /// <summary>Case-insensitive substring search over every indexed file/folder name, not just the current directory — backs the File Manager's search box.</summary>
+    public async Task<FileItem[]> SearchFileIndexAsync(string query, int limit = 200)
+    {
+        var escaped = query.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+        await using var connection = Open();
+        var command = connection.CreateCommand();
+        command.CommandText =
+            "select name, path, is_dir, size, created_utc, mtime_utc from file_index where path != '' and name like $q escape '\\' order by is_dir desc, name limit $limit";
+        command.Parameters.AddWithValue("$q", "%" + escaped + "%");
+        command.Parameters.AddWithValue("$limit", limit);
+        var items = new List<FileItem>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var isDir = reader.GetInt32(2) == 1;
+            var created = DateTime.Parse(reader.GetString(4), null, System.Globalization.DateTimeStyles.RoundtripKind);
+            var modified = DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind);
+            items.Add(new FileItem(reader.GetString(0), reader.GetString(1), isDir, reader.GetInt64(3), modified, created));
+        }
+        return items.ToArray();
+    }
+
     public async Task<long?> GetIndexedRootSizeAsync()
     {
         await using var connection = Open();

@@ -388,6 +388,16 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
               </label>
             </div>
           </div>
+          <div class="mt-2 position-relative">
+            <input
+              type="search"
+              id="file-search-input"
+              class="form-control form-control-sm"
+              placeholder="Search files and folders across the whole server…"
+              autocomplete="off"
+            />
+            <div id="file-search-results" class="file-search-results d-none"></div>
+          </div>
           <nav id="breadcrumb" aria-label="breadcrumb" class="mt-2">
             <ol class="breadcrumb mb-0" id="breadcrumb-list"></ol>
           </nav>
@@ -401,9 +411,17 @@ import RuntimeStatus from '../components/RuntimeStatus.vue';
         <div id="file-editor-panel" class="card-panel mt-3 d-none">
           <div class="panel-header d-flex justify-content-between">
             <span id="editor-filename"></span>
-            <button id="btn-save-file" class="btn btn-sm btn-success">
-              <i class="fa fa-floppy-disk me-1"></i>Save
-            </button>
+            <div class="d-flex gap-2">
+              <button id="btn-save-file" class="btn btn-sm btn-success">
+                <i class="fa fa-floppy-disk me-1"></i>Save
+              </button>
+              <button id="btn-save-close-file" class="btn btn-sm btn-outline-success">
+                <i class="fa fa-check me-1"></i>Save &amp; close
+              </button>
+              <button id="btn-close-file" class="btn btn-sm btn-outline-secondary" title="Close without saving">
+                <i class="fa fa-xmark"></i>
+              </button>
+            </div>
           </div>
           <div id="file-editor" class="syntax-editor-host mt-2"></div>
         </div>
