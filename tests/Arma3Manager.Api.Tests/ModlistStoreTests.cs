@@ -21,6 +21,22 @@ public sealed class ModlistStoreTests
     }
 
     [Fact]
+    public async Task SavingUnderAnExistingNameUpdatesInPlaceInsteadOfDuplicating()
+    {
+        using var fixture = new TemporaryDirectory();
+        var store = new SqliteStore(Path.Combine(fixture.Path, "manager.sqlite3"));
+        await store.InitAsync();
+
+        var first = await store.SaveModlistAsync(new("Respuesta biologica", [new("Mod 1", "100")], false));
+        var second = await store.SaveModlistAsync(new("Respuesta biologica", [new("Mod 1", "100"), new("Mod 2", "200")], false));
+
+        Assert.Equal(first.Id, second.Id);
+        var state = await store.GetModlistsAsync();
+        var saved = Assert.Single(state.Lists);
+        Assert.Equal(2, saved.Mods.Count);
+    }
+
+    [Fact]
     public async Task DeletingActiveModlistClearsActiveSelection()
     {
         using var fixture = new TemporaryDirectory();

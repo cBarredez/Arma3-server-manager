@@ -111,6 +111,7 @@ public sealed class SqliteStore(string dbPath)
         await ApplyHeadlessClientHistoryMigrationAsync(connection);
         await ApplyNaturalPlayerIdentityMigrationAsync(connection);
         await ApplyMetricsCorrelationMigrationAsync(connection);
+        await ApplyModlistNameUniquenessMigrationAsync(connection);
     }
 
     public async Task<PersistedServerRuntime> GetServerRuntimeAsync()
@@ -337,6 +338,58 @@ public sealed class SqliteStore(string dbPath)
         """;
         migrate.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         await migrate.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
+    // A missing double-submit guard on "Save Modlist" (fixed alongside this migration) let a single save
+    // action insert two identical rows. This collapses any existing duplicate names down to one row —
+    // preferring the currently active one if a duplicate group has it, else the newest — then adds a
+    // unique index so SaveModlistAsync can upsert by name and can't produce duplicates again.
+    static async Task ApplyModlistNameUniquenessMigrationAsync(SqliteConnection connection)
+    {
+        var applied = connection.CreateCommand();
+        applied.CommandText = "select 1 from schema_migrations where version=6 limit 1";
+        if (await applied.ExecuteScalarAsync() is not null) return;
+
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+
+        var activeIdCommand = connection.CreateCommand();
+        activeIdCommand.Transaction = transaction;
+        activeIdCommand.CommandText = "select value from app_state where key='active-modlist'";
+        var activeId = (string?)await activeIdCommand.ExecuteScalarAsync();
+
+        var select = connection.CreateCommand();
+        select.Transaction = transaction;
+        select.CommandText = "select id,name from modlists order by created_at desc,id desc";
+        var rows = new List<(string Id, string Name)>();
+        await using (var reader = await select.ExecuteReaderAsync())
+            while (await reader.ReadAsync()) rows.Add((reader.GetString(0), reader.GetString(1)));
+
+        var keepIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var group in rows.GroupBy(row => row.Name, StringComparer.Ordinal))
+        {
+            var groupList = group.ToList();
+            var keep = groupList.FirstOrDefault(row => row.Id == activeId, groupList[0]);
+            keepIds.Add(keep.Id);
+        }
+
+        foreach (var row in rows.Where(row => !keepIds.Contains(row.Id)))
+        {
+            var delete = connection.CreateCommand();
+            delete.Transaction = transaction;
+            delete.CommandText = "delete from modlists where id=$id";
+            delete.Parameters.AddWithValue("$id", row.Id);
+            await delete.ExecuteNonQueryAsync();
+        }
+
+        var index = connection.CreateCommand();
+        index.Transaction = transaction;
+        index.CommandText = """
+        create unique index if not exists ux_modlists_name on modlists(name);
+        insert into schema_migrations(version,applied_at) values(6,$now);
+        """;
+        index.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        await index.ExecuteNonQueryAsync();
         await transaction.CommitAsync();
     }
 
@@ -964,12 +1017,38 @@ public sealed class SqliteStore(string dbPath)
         while (await reader.ReadAsync()) lists.Add(new(reader.GetString(0), reader.GetString(1), JsonSerializer.Deserialize<List<PresetMod>>(reader.GetString(2), json) ?? [], DateTimeOffset.Parse(reader.GetString(3))));
         return new(await GetRawStateAsync("active-modlist"), lists);
     }
+    // Upserts by name (backed by ux_modlists_name) rather than always inserting: saving under a name that
+    // already exists updates that row in place instead of creating a duplicate, so a double-fired save
+    // (double-click, or Save followed by Install using the same name) can no longer produce two rows.
     public async Task<Modlist> SaveModlistAsync(ModlistSaveRequest request)
     {
-        var list = new Modlist(Guid.NewGuid().ToString("n"), string.IsNullOrWhiteSpace(request.Name) ? $"Modlist {DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm}" : request.Name, request.Mods, DateTimeOffset.UtcNow);
-        await using var connection = Open(); var command = connection.CreateCommand(); command.CommandText = "insert into modlists(id,name,mods_json,created_at) values($id,$name,$mods,$created)";
-        command.Parameters.AddWithValue("$id", list.Id); command.Parameters.AddWithValue("$name", list.Name); command.Parameters.AddWithValue("$mods", JsonSerializer.Serialize(list.Mods, json)); command.Parameters.AddWithValue("$created", list.CreatedAt.ToString("O")); await command.ExecuteNonQueryAsync();
-        if (request.Activate) await ActivateModlistAsync(list.Id); return list;
+        var name = string.IsNullOrWhiteSpace(request.Name) ? $"Modlist {DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm}" : request.Name;
+        var candidateId = Guid.NewGuid().ToString("n");
+        string resolvedId;
+        DateTimeOffset createdAt;
+        // Connection (and its reader) are closed before ActivateModlistAsync opens its own — otherwise the
+        // upsert can still be pending when that separate connection re-reads the modlists table for the
+        // activation check, so it doesn't see the row that was just written.
+        await using (var connection = Open())
+        {
+            var command = connection.CreateCommand();
+            command.CommandText = """
+            insert into modlists(id,name,mods_json,created_at) values($id,$name,$mods,$created)
+            on conflict(name) do update set mods_json=excluded.mods_json, created_at=excluded.created_at
+            returning id,created_at
+            """;
+            command.Parameters.AddWithValue("$id", candidateId);
+            command.Parameters.AddWithValue("$name", name);
+            command.Parameters.AddWithValue("$mods", JsonSerializer.Serialize(request.Mods, json));
+            command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
+            await using var reader = await command.ExecuteReaderAsync();
+            await reader.ReadAsync();
+            resolvedId = reader.GetString(0);
+            createdAt = DateTimeOffset.Parse(reader.GetString(1));
+        }
+        var list = new Modlist(resolvedId, name, request.Mods, createdAt);
+        if (request.Activate) await ActivateModlistAsync(list.Id);
+        return list;
     }
     public async Task<ModlistState> ActivateModlistAsync(string id)
     {

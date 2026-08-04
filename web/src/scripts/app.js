@@ -1730,16 +1730,22 @@ function showPresetPreview(mods, savedPath = '') {
     return saved;
   }
 
+  // Disabled for the duration of the request so a double-click (or a mis-tap on touch) can't fire a
+  // second save while the first is still in flight — the backend now upserts by name too, but this
+  // avoids the redundant round-trip and gives immediate feedback that the click registered.
   document.getElementById('btn-save-modlist').onclick = async () => {
     const selected = [...list.querySelectorAll('input:checked')].map(cb => ({
       workshopId: cb.dataset.workshopId,
       name: cb.dataset.name,
     }));
     if (!selected.length) { toast('No mods selected', 'warning'); return; }
+    const btn = document.getElementById('btn-save-modlist');
+    btn.disabled = true;
     try {
       const saved = await saveCurrentModlist(selected);
       if (saved) toast(`Modlist saved: ${saved.name}`);
     } catch (e) { toast(e.message, 'error'); }
+    finally { btn.disabled = false; }
   };
 
   document.getElementById('btn-install-preset').onclick = async () => {
@@ -1748,6 +1754,8 @@ function showPresetPreview(mods, savedPath = '') {
       name: cb.dataset.name,
     }));
     if (!selected.length) { toast('No mods selected', 'warning'); return; }
+    const btn = document.getElementById('btn-install-preset');
+    btn.disabled = true;
     try {
       const saved = await saveCurrentModlist(selected);
       if (!saved) return; // no name entered — user was prompted, don't install without saving
@@ -1755,6 +1763,7 @@ function showPresetPreview(mods, savedPath = '') {
       toast(`Modlist saved: ${saved.name}. ${queued ? `${queued} missing mods queued; ${alreadyInstalled || 0} already installed` : 'All selected mods are already installed'}`);
       panel.classList.add('d-none');
     } catch (e) { handleSteamLoginRequired(e); }
+    finally { btn.disabled = false; }
   };
 }
 
