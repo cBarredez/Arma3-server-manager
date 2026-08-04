@@ -38,6 +38,12 @@ class DeployConfigTests(unittest.TestCase):
         target = deploy.validate_local("dev")
         self.assertEqual("arma3@10.0.0.5", target.ssh)
 
+    @patch.object(deploy, "remote_capture", return_value="aarch64")
+    @patch.object(deploy, "remote")
+    def test_remote_arm_host_is_rejected_before_build(self, _remote, _capture):
+        with self.assertRaisesRegex(SystemExit, "x86_64 Linux server"):
+            deploy.verify_remote_host(deploy.Target("dev", "10.0.0.5", "arma3"))
+
     def test_insecure_secret_file_permissions_are_rejected(self):
         deploy.SECRETS_FILE.chmod(0o644)
         with self.assertRaisesRegex(SystemExit, "mode 0600"):
@@ -86,10 +92,19 @@ class DeployConfigTests(unittest.TestCase):
 
         self.assertIn("/sys:/host-sys:ro", command)
 
+    def test_frontend_uses_configured_backend_port(self):
+        text = deploy.MANAGER_FILE.read_text(encoding="utf-8").replace("port=8080", "port=8181", 1)
+        deploy.MANAGER_FILE.write_text(text, encoding="utf-8")
+
+        command = deploy.frontend_command("localhost/frontend:test")
+
+        self.assertIn("ARMA3_API_BACKEND=arma3-api:8181", command)
+
     @patch.object(deploy, "remote")
     @patch.object(deploy, "remote_capture")
     def test_existing_podman_secret_is_preserved(self, remote_capture, remote):
-        remote_capture.side_effect = ["yes", "existing-secret-id"]
+        remote_capture.return_value = "existing-secret-id"
+        remote.return_value = CompletedProcess([], 0)
         target = deploy.Target("dev", "10.0.0.5", "arma3")
 
         deploy.ensure_runtime(target)
@@ -99,6 +114,13 @@ class DeployConfigTests(unittest.TestCase):
             if call.args[1][:3] == ["podman", "secret", "create"]
         ]
         self.assertEqual([], secret_creates)
+
+    @patch.object(deploy, "remote_capture", return_value="/old/release/config/manager.toml")
+    def test_frontend_only_deploy_can_reuse_backend_config_mount(self, remote_capture):
+        target = deploy.Target("dev", "10.0.0.5", "arma3")
+
+        self.assertEqual("/old/release/config/manager.toml", deploy.current_manager_config(target))
+        self.assertEqual("arma3-api", remote_capture.call_args.args[1][-1])
 
     @patch.object(deploy, "remote")
     def test_build_does_not_prune_before_container_replacement(self, remote):
@@ -111,6 +133,7 @@ class DeployConfigTests(unittest.TestCase):
         self.assertEqual("podman", command[0])
         self.assertEqual("build", command[1])
         self.assertIn("--build-arg", command)
+        self.assertEqual("linux/amd64", command[command.index("--platform") + 1])
         self.assertEqual("/release/Containerfile.api", command[command.index("--file") + 1])
         self.assertEqual("localhost/arma3-manager-api:20260714010000", command[command.index("--tag") + 1])
         self.assertEqual("/release", command[-1])
@@ -155,6 +178,7 @@ class DeployConfigTests(unittest.TestCase):
                 with (
                     patch.object(deploy, "validate_local", return_value=target),
                     patch.object(deploy, "verify_tools"),
+                    patch.object(deploy, "verify_remote_host"),
                     patch.object(deploy, "remote", return_value=CompletedProcess([], 0)),
                     patch.object(deploy, "confirm_backend"),
                     patch.object(deploy, "upload_release", return_value="/release"),

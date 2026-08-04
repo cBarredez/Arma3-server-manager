@@ -173,6 +173,15 @@ def verify_tools() -> None:
             raise SystemExit(f"Required command not found: {binary}")
 
 
+def verify_remote_host(target: Target) -> None:
+    remote(target, ["podman", "info"])
+    architecture = remote_capture(target, ["uname", "-m"]).lower()
+    if architecture not in {"x86_64", "amd64"}:
+        raise SystemExit(
+            f"Arma 3 requires an x86_64 Linux server; remote architecture is {architecture or 'unknown'}"
+        )
+
+
 def confirm_backend(target: Target, yes: bool) -> None:
     if yes:
         return
@@ -212,17 +221,19 @@ def upload_secrets(target: Target) -> None:
 
 
 def ensure_runtime(target: Target) -> None:
-    remote(target, ["podman", "network", "create", NETWORK], check=False)
+    if remote(target, ["podman", "network", "inspect", NETWORK], check=False).returncode != 0:
+        remote(target, ["podman", "network", "create", NETWORK])
     for volume in ("arma3-server", "steam-home", "steam-config", "aspnet-keys"):
-        remote(target, ["podman", "volume", "create", volume], check=False)
+        if remote(target, ["podman", "volume", "inspect", volume], check=False).returncode != 0:
+            remote(target, ["podman", "volume", "create", volume])
     secret_file = f"{target.remote_root}/config/manager.secrets.toml"
-    marker = remote_capture(target, ["sh", "-c", f"test -f {secret_file} && echo yes || true"], check=False)
+    secret_file_exists = remote(target, ["test", "-f", secret_file], check=False).returncode == 0
     existing_secret = remote_capture(
         target,
         ["podman", "secret", "inspect", "--format", "{{.ID}}", PODMAN_SECRET],
         check=False,
     )
-    if marker == "yes" and not existing_secret:
+    if secret_file_exists and not existing_secret:
         remote(target, ["podman", "secret", "create", PODMAN_SECRET, secret_file])
 
 
@@ -243,6 +254,7 @@ def build_image(target: Target, remote_dir: str, release: str, service: str) -> 
         target,
         [
             "podman", "build",
+            "--platform", "linux/amd64",
             "--build-arg", f"GIT_COMMIT={git_commit()}",
             "--build-arg", f"BUILD_DATE={build_date}",
             "--file", f"{remote_dir}/{containerfile}", "--tag", image, remote_dir,
@@ -310,7 +322,8 @@ def frontend_command(image: str, instance_id: str | None = None) -> list[str]:
     config = manager_config()
     web = config.get("web", {})
     server = config.get("server", {})
-    backend = f"host.containers.internal:{web.get('port', 8080)}" if server.get("network_mode") == "host" else "arma3-api:8080"
+    backend_port = web.get("port", 8080)
+    backend = f"host.containers.internal:{backend_port}" if server.get("network_mode") == "host" else f"arma3-api:{backend_port}"
     command = ["podman", "run", "-d", "--replace", "--name", "arma3-frontend", "--restart", "unless-stopped"]
     if instance_id:
         command += contract_labels(instance_id, "frontend")
@@ -346,7 +359,26 @@ def finish_contract_runtime(target: Target, remote_dir: str, instance_id: str, o
     )
 
 
-def sync_contract_runtime(target: Target, remote_dir: str, instance_id: str, operation_id: str) -> None:
+def current_manager_config(target: Target) -> str | None:
+    value = remote_capture(
+        target,
+        [
+            "podman", "inspect", "--format",
+            '{{range .Mounts}}{{if eq .Destination "/app/config/manager.toml"}}{{.Source}}{{end}}{{end}}',
+            "arma3-api",
+        ],
+        check=False,
+    )
+    return value or None
+
+
+def sync_contract_runtime(
+    target: Target,
+    remote_dir: str,
+    instance_id: str,
+    operation_id: str,
+    config_path: str | None = None,
+) -> None:
     # Selective first-time deployments may not have both services yet. They
     # remain intentionally undiscoverable until the complete stack exists.
     if current_image(target, "arma3-api") is None or current_image(target, "arma3-frontend") is None:
@@ -359,7 +391,7 @@ def sync_contract_runtime(target: Target, remote_dir: str, instance_id: str, ope
         "--instance-id",
         instance_id,
         "--config-path",
-        f"{remote_dir}/config/manager.toml",
+        config_path or f"{remote_dir}/config/manager.toml",
         "--driver-path",
         f"{remote_dir}/manager_driver.py",
         "--operation-id",
@@ -404,7 +436,7 @@ def restart_frontend_proxy(target: Target) -> None:
 def deploy(args: argparse.Namespace) -> int:
     target = validate_local(args.environment)
     verify_tools()
-    remote(target, ["podman", "info"])
+    verify_remote_host(target)
     if args.backend:
         confirm_backend(target, args.yes)
     release = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -425,7 +457,10 @@ def deploy(args: argparse.Namespace) -> int:
         # image is still associated with a container and Podman correctly considers it in use. `-a`
         # includes old release-tagged images; the label filter excludes every unrelated host image.
         prune_project_images(target)
-        sync_contract_runtime(target, remote_dir, instance_id, operation_id)
+        config_path = None if args.backend else current_manager_config(target)
+        if not args.backend and config_path is None:
+            raise SystemExit("Cannot determine the existing backend manager.toml mount")
+        sync_contract_runtime(target, remote_dir, instance_id, operation_id, config_path)
     finally:
         finish_contract_runtime(target, remote_dir, instance_id, operation_id)
     print(f"Deployment {release} to {target.environment} completed")
