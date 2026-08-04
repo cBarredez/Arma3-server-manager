@@ -162,6 +162,7 @@ Despliegues selectivos:
 
 ```bash
 python3 deploy.py dev --check
+python3 deploy.py dev --check --force   # solo dev: omite únicamente el modo 0600
 python3 deploy.py dev --frontend
 python3 deploy.py dev --backend
 python3 deploy.py prod --frontend
@@ -179,8 +180,9 @@ python3 deploy.py prod --logs frontend
 
 El script:
 
-1. valida TOML, SSH y Podman;
-2. transfiere una release sin secretos ni artefactos;
+1. valida TOML, SSH, `rsync` y Podman;
+2. transfiere con `rsync` una release sin secretos ni artefactos, mostrando
+   progreso y cada archivo modificado;
 3. construye sólo la imagen solicitada en el servidor Linux;
 4. conserva volúmenes;
 5. reemplaza únicamente el contenedor seleccionado;
@@ -190,6 +192,10 @@ El script:
    resuelva la dirección del nuevo contenedor API;
 9. elimina imágenes antiguas sin contenedor únicamente cuando llevan el label
    `project=arma3-manager`; no ejecuta un prune global ni toca imágenes ajenas.
+
+Todas las operaciones SSH se muestran antes de ejecutarse. Los diagnósticos
+del driver y de Podman se escriben en tiempo real aunque stdout se reserve para
+procesar las respuestas JSON del contrato.
 
 Para acceder al panel de desarrollo desde otra computadora, cambia
 `web.bind_ip` a `"0.0.0.0"`. Conserva `"127.0.0.1"` si el panel estará detrás

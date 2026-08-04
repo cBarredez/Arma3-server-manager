@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
-import os
 import shlex
 import shutil
 import stat
@@ -54,21 +53,47 @@ def _ssh_opts(target: Target) -> list[str]:
 
 
 def run(args: list[str], *, check: bool = True, input_data: bytes | None = None) -> subprocess.CompletedProcess:
-    print("+", shlex.join(args))
+    print("+", shlex.join(args), flush=True)
     return subprocess.run(args, cwd=ROOT, check=check, input=input_data)
 
 
-def capture(args: list[str], *, check: bool = True) -> str:
-    result = subprocess.run(args, cwd=ROOT, check=check, text=True, capture_output=True)
-    return result.stdout.strip()
+def capture(
+    args: list[str],
+    *,
+    check: bool = True,
+    log_command: bool = True,
+    echo_output: bool = True,
+) -> str:
+    if log_command:
+        print("+", shlex.join(args), flush=True)
+    # Keep stdout available to protocol callers while stderr remains attached
+    # to the terminal. Driver and SSH diagnostics are therefore visible in
+    # real time instead of appearing only after a command exits.
+    result = subprocess.run(args, cwd=ROOT, check=check, text=True, stdout=subprocess.PIPE)
+    output = result.stdout.strip()
+    if echo_output and output:
+        print(output, flush=True)
+    return output
 
 
 def remote(target: Target, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     return run(["ssh"] + _ssh_opts(target) + [target.ssh, shlex.join(args)], check=check)
 
 
-def remote_capture(target: Target, args: list[str], *, check: bool = True) -> str:
-    return capture(["ssh"] + _ssh_opts(target) + [target.ssh, shlex.join(args)], check=check)
+def remote_capture(
+    target: Target,
+    args: list[str],
+    *,
+    check: bool = True,
+    log_command: bool = True,
+    echo_output: bool = True,
+) -> str:
+    return capture(
+        ["ssh"] + _ssh_opts(target) + [target.ssh, shlex.join(args)],
+        check=check,
+        log_command=log_command,
+        echo_output=echo_output,
+    )
 
 
 def remote_driver(target: Target, remote_dir: str, command: str, *args: str, check: bool = True) -> dict:
@@ -168,7 +193,7 @@ def validate_local(environment: str, *, force: bool = False) -> Target:
 
 
 def verify_tools() -> None:
-    for binary in ("ssh", "tar", "scp"):
+    for binary in ("ssh", "rsync", "scp"):
         if shutil.which(binary) is None:
             raise SystemExit(f"Required command not found: {binary}")
 
@@ -180,6 +205,7 @@ def verify_remote_host(target: Target) -> None:
         raise SystemExit(
             f"Arma 3 requires an x86_64 Linux server; remote architecture is {architecture or 'unknown'}"
         )
+    remote(target, ["rsync", "--version"])
 
 
 def confirm_backend(target: Target, yes: bool) -> None:
@@ -193,18 +219,31 @@ def confirm_backend(target: Target, yes: bool) -> None:
 def upload_release(target: Target, release: str) -> str:
     remote_dir = f"{target.remote_root}/releases/{release}"
     remote(target, ["mkdir", "-p", remote_dir, f"{target.remote_root}/config"])
-    archive = subprocess.Popen(
-        ["tar", "-czf", "-", "--exclude=.git", "--exclude=node_modules", "--exclude=dist", "--exclude=bin", "--exclude=obj", "--exclude=._*", "--exclude=manager.secrets.toml", "."],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        env={**os.environ, "COPYFILE_DISABLE": "1"},
+    ssh_transport = shlex.join(["ssh", *_ssh_opts(target)])
+    run(
+        [
+            "rsync",
+            "-az",
+            "--delete",
+            "--partial",
+            "--progress",
+            "--itemize-changes",
+            "--exclude=.git/",
+            "--exclude=node_modules/",
+            "--exclude=dist/",
+            "--exclude=bin/",
+            "--exclude=obj/",
+            "--exclude=__pycache__/",
+            "--exclude=.DS_Store",
+            "--exclude=._*",
+            "--exclude=config/manager.secrets.toml",
+            "--exclude=deploy.toml",
+            "-e",
+            ssh_transport,
+            f"{ROOT}/",
+            f"{target.ssh}:{remote_dir}/",
+        ],
     )
-    assert archive.stdout is not None
-    extract = subprocess.run(["ssh"] + _ssh_opts(target) + [target.ssh, f"tar -xzf - -C {shlex.quote(remote_dir)}"], stdin=archive.stdout)
-    archive.stdout.close()
-    archive_code = archive.wait()
-    if archive_code or extract.returncode:
-        raise SystemExit("Project transfer failed")
     return remote_dir
 
 
@@ -401,10 +440,19 @@ def sync_contract_runtime(
 
 def wait_healthy(target: Target, container: str, timeout: int = 120) -> bool:
     deadline = time.monotonic() + timeout
+    previous_state = None
     while time.monotonic() < deadline:
-        state = remote_capture(target, ["podman", "inspect", "--format", "{{if .State.Health}}{{if .State.Health.Status}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}{{else}}{{.State.Status}}{{end}}", container], check=False)
+        state = remote_capture(
+            target,
+            ["podman", "inspect", "--format", "{{if .State.Health}}{{if .State.Health.Status}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}{{else}}{{.State.Status}}{{end}}", container],
+            check=False,
+            log_command=False,
+            echo_output=False,
+        )
+        if state != previous_state:
+            print(f"{container}: {state or 'not found'}", flush=True)
+            previous_state = state
         if state in {"healthy", "running"}:
-            print(f"{container}: {state}")
             return True
         if state in {"unhealthy", "exited", "dead"}:
             return False
@@ -440,15 +488,20 @@ def deploy(args: argparse.Namespace) -> int:
     if args.backend:
         confirm_backend(target, args.yes)
     release = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    print(f"==> Transferring release {release} with rsync", flush=True)
     remote_dir = upload_release(target, release)
+    print("==> Reserving the standalone manager deployment", flush=True)
     instance_id, operation_id = prepare_contract_runtime(target, remote_dir)
     try:
+        print("==> Preparing secrets and Podman resources", flush=True)
         upload_secrets(target)
         ensure_runtime(target)
         if args.backend:
+            print("==> Building and replacing the backend", flush=True)
             image = build_image(target, remote_dir, release, "api")
             replace(target, "arma3-api", image, api_command(target, image, remote_dir, instance_id), current_image(target, "arma3-api"))
         if args.frontend:
+            print("==> Building and replacing the frontend", flush=True)
             image = build_image(target, remote_dir, release, "frontend")
             replace(target, "arma3-frontend", image, frontend_command(image, instance_id), current_image(target, "arma3-frontend"))
         elif args.backend:
@@ -456,10 +509,12 @@ def deploy(args: argparse.Namespace) -> int:
         # Cleanup must run after every selected container has been replaced. Before this point the old
         # image is still associated with a container and Podman correctly considers it in use. `-a`
         # includes old release-tagged images; the label filter excludes every unrelated host image.
+        print("==> Cleaning old project images", flush=True)
         prune_project_images(target)
         config_path = None if args.backend else current_manager_config(target)
         if not args.backend and config_path is None:
             raise SystemExit("Cannot determine the existing backend manager.toml mount")
+        print("==> Synchronizing standalone contract metadata", flush=True)
         sync_contract_runtime(target, remote_dir, instance_id, operation_id, config_path)
     finally:
         finish_contract_runtime(target, remote_dir, instance_id, operation_id)

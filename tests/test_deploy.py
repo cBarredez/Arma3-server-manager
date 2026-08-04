@@ -145,6 +145,30 @@ class DeployConfigTests(unittest.TestCase):
         self.assertEqual("localhost/arma3-manager-api:20260714010000", command[command.index("--tag") + 1])
         self.assertEqual("/release", command[-1])
 
+    @patch.object(deploy, "run")
+    @patch.object(deploy, "remote")
+    def test_release_is_transferred_with_rsync_and_excludes_private_state(self, remote, run):
+        target = deploy.Target("dev", "10.0.0.5", "arma3")
+
+        result = deploy.upload_release(target, "20260804010000")
+
+        self.assertEqual(
+            "/home/arma3/.local/share/arma3-manager/releases/20260804010000",
+            result,
+        )
+        command = run.call_args.args[0]
+        self.assertEqual("rsync", command[0])
+        self.assertIn("--progress", command)
+        self.assertIn("--delete", command)
+        self.assertIn("--exclude=config/manager.secrets.toml", command)
+        self.assertIn("--exclude=deploy.toml", command)
+        self.assertEqual(
+            "arma3@10.0.0.5:/home/arma3/.local/share/arma3-manager/releases/20260804010000/",
+            command[-1],
+        )
+        self.assertNotIn("tar", command)
+        remote.assert_called_once()
+
     def test_contract_labels_identify_instance_and_role(self):
         labels = deploy.contract_labels("a" * 32, "api")
         self.assertIn("io.gameserver-manager.contract.version=1.0", labels)
