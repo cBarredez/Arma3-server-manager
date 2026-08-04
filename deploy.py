@@ -139,13 +139,13 @@ def manager_config() -> dict:
     return config
 
 
-def validate_secrets() -> dict:
+def validate_secrets(*, allow_insecure_permissions: bool = False) -> dict:
     if not SECRETS_FILE.exists():
         raise SystemExit("Missing config/manager.secrets.toml; copy the example and set secure values")
     secret_stat = SECRETS_FILE.lstat()
     if not stat.S_ISREG(secret_stat.st_mode) or SECRETS_FILE.is_symlink():
         raise SystemExit("config/manager.secrets.toml must be a regular file, not a symlink")
-    if stat.S_IMODE(secret_stat.st_mode) & 0o077:
+    if not allow_insecure_permissions and stat.S_IMODE(secret_stat.st_mode) & 0o077:
         raise SystemExit("config/manager.secrets.toml must have mode 0600")
     secrets = tomllib.loads(SECRETS_FILE.read_text(encoding="utf-8"))
     web = secrets.get("web", {})
@@ -158,10 +158,10 @@ def validate_secrets() -> dict:
     return secrets
 
 
-def validate_local(environment: str) -> Target:
+def validate_local(environment: str, *, force: bool = False) -> Target:
     target = load_target(environment)
     config = manager_config()
-    validate_secrets()
+    validate_secrets(allow_insecure_permissions=force)
     print(f"Configuration OK: {environment} -> {target.ssh}")
     print(f"Network: {config['server']['network_mode']}; panel port: {config['web']['public_port']}")
     return target
@@ -434,7 +434,7 @@ def restart_frontend_proxy(target: Target) -> None:
 
 
 def deploy(args: argparse.Namespace) -> int:
-    target = validate_local(args.environment)
+    target = validate_local(args.environment, force=args.force)
     verify_tools()
     verify_remote_host(target)
     if args.backend:
@@ -477,9 +477,14 @@ def main() -> int:
     parser.add_argument("--frontend", action="store_true")
     parser.add_argument("--backend", action="store_true")
     parser.add_argument("--yes", action="store_true", help="accept backend downtime")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow manager.secrets.toml permissions other than 0600 (development only)",
+    )
     args = parser.parse_args()
     if args.check:
-        validate_local(args.environment)
+        validate_local(args.environment, force=args.force)
         return 0
     target = load_target(args.environment)
     if args.status:

@@ -49,6 +49,13 @@ class DeployConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "mode 0600"):
             deploy.validate_secrets()
 
+    def test_force_allows_insecure_secret_file_permissions(self):
+        deploy.SECRETS_FILE.chmod(0o644)
+
+        secrets = deploy.validate_secrets(allow_insecure_permissions=True)
+
+        self.assertEqual("a-secure-password", secrets["web"]["password"])
+
     def test_duplicate_game_ports_are_rejected(self):
         text = deploy.MANAGER_FILE.read_text(encoding="utf-8").replace("query_port=2303", "query_port=2302")
         deploy.MANAGER_FILE.write_text(text, encoding="utf-8")
@@ -174,7 +181,7 @@ class DeployConfigTests(unittest.TestCase):
             with self.subTest(environment=environment):
                 target = deploy.Target(environment, "10.0.0.5", "arma3")
                 events = []
-                args = argparse.Namespace(environment=environment, backend=True, frontend=False, yes=True)
+                args = argparse.Namespace(environment=environment, backend=True, frontend=False, yes=True, force=False)
                 with (
                     patch.object(deploy, "validate_local", return_value=target),
                     patch.object(deploy, "verify_tools"),
