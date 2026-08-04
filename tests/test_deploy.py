@@ -38,6 +38,15 @@ class DeployConfigTests(unittest.TestCase):
         target = deploy.validate_local("dev")
         self.assertEqual("arma3@10.0.0.5", target.ssh)
 
+    @patch.object(deploy, "remote_capture", return_value='{"instanceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}')
+    def test_remote_driver_closes_stdin_for_argument_only_commands(self, remote_capture):
+        target = deploy.Target("dev", "10.0.0.5", "arma3")
+
+        result = deploy.remote_driver(target, "/release", "ensure-id")
+
+        self.assertEqual("a" * 32, result["instanceId"])
+        self.assertEqual("", remote_capture.call_args.kwargs["input_data"])
+
     @patch.object(deploy, "remote_capture", return_value="aarch64")
     @patch.object(deploy, "remote")
     def test_remote_arm_host_is_rejected_before_build(self, _remote, _capture):

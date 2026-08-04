@@ -63,13 +63,21 @@ def capture(
     check: bool = True,
     log_command: bool = True,
     echo_output: bool = True,
+    input_data: str | None = None,
 ) -> str:
     if log_command:
         print("+", shlex.join(args), flush=True)
     # Keep stdout available to protocol callers while stderr remains attached
     # to the terminal. Driver and SSH diagnostics are therefore visible in
     # real time instead of appearing only after a command exits.
-    result = subprocess.run(args, cwd=ROOT, check=check, text=True, stdout=subprocess.PIPE)
+    result = subprocess.run(
+        args,
+        cwd=ROOT,
+        check=check,
+        text=True,
+        stdout=subprocess.PIPE,
+        input=input_data,
+    )
     output = result.stdout.strip()
     if echo_output and output:
         print(output, flush=True)
@@ -87,18 +95,29 @@ def remote_capture(
     check: bool = True,
     log_command: bool = True,
     echo_output: bool = True,
+    input_data: str | None = None,
 ) -> str:
     return capture(
         ["ssh"] + _ssh_opts(target) + [target.ssh, shlex.join(args)],
         check=check,
         log_command=log_command,
         echo_output=echo_output,
+        input_data=input_data,
     )
 
 
 def remote_driver(target: Target, remote_dir: str, command: str, *args: str, check: bool = True) -> dict:
     """Invoke the local contract driver on the target and parse its JSON result."""
-    result = remote_capture(target, ["python3", f"{remote_dir}/manager_driver.py", command, *args], check=check)
+    # The driver accepts optional JSON over stdin. SSH does not allocate a
+    # remote TTY here, so inheriting the local terminal leaves sys.stdin as an
+    # open pipe and read_request() waits forever. An explicit empty input
+    # closes that pipe immediately for deploy.py's argument-only commands.
+    result = remote_capture(
+        target,
+        ["python3", f"{remote_dir}/manager_driver.py", command, *args],
+        check=check,
+        input_data="",
+    )
     if not result:
         return {}
     try:
