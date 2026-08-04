@@ -198,6 +198,31 @@ de un proxy inverso local.
 Actualizar el backend detiene el proceso de Arma 3 porque actualmente vive en el
 contenedor API. Por eso requiere confirmación o `--yes`.
 
+## Contrato Server Manager v1
+
+Este repositorio implementa el contrato común en
+[`server-manager.contract.json`](server-manager.contract.json) y el protocolo
+local JSON en [`manager_driver.py`](manager_driver.py). El primer despliegue
+del parche conserva el secreto de Podman, la configuración, los cuatro
+volúmenes, la red, los puertos y los datos existentes; persiste un UUID estable
+y recrea únicamente los contenedores seleccionados con las etiquetas OCI v1.
+El manifiesto runtime registra referencias e imágenes reales, nunca valores de
+secretos.
+
+El hub puede descubrir y adoptar esa instancia en sitio bajo el mismo host y
+usuario Unix. La adopción crea un `controller.json` privado (`0600`) y todas
+las operaciones se serializan con un lock por instancia. Mientras exista un
+claim del hub, `deploy.py` rechaza cambios manuales. Desvincular libera el
+control sin detener ni eliminar recursos, tras lo cual el despliegue manual
+vuelve a estar disponible.
+
+Las capacidades publicadas por esta primera versión son descubrimiento,
+adopción, ciclo de vida, salud y desvinculación. Los comandos del namespace
+estándar que todavía no se anuncian —provisión, recreate, update, rotación de
+secretos y destrucción— responden de forma tipada como no soportados; el hub no
+debe mostrarlos. La especificación canónica, la política de secretos y el
+procedimiento de adopción se mantienen en `game_servers_manager_hub/docs/`.
+
 ## Documentación backend
 
 ```bash

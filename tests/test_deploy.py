@@ -28,6 +28,7 @@ class DeployConfigTests(unittest.TestCase):
             'session_secret="01234567890123456789012345678901"\n',
             encoding="utf-8",
         )
+        deploy.SECRETS_FILE.chmod(0o600)
 
     def tearDown(self):
         deploy.DEPLOY_FILE, deploy.MANAGER_FILE, deploy.SECRETS_FILE = self.originals
@@ -36,6 +37,11 @@ class DeployConfigTests(unittest.TestCase):
     def test_valid_configuration(self):
         target = deploy.validate_local("dev")
         self.assertEqual("arma3@10.0.0.5", target.ssh)
+
+    def test_insecure_secret_file_permissions_are_rejected(self):
+        deploy.SECRETS_FILE.chmod(0o644)
+        with self.assertRaisesRegex(SystemExit, "mode 0600"):
+            deploy.validate_secrets()
 
     def test_duplicate_game_ports_are_rejected(self):
         text = deploy.MANAGER_FILE.read_text(encoding="utf-8").replace("query_port=2303", "query_port=2302")
@@ -81,19 +87,39 @@ class DeployConfigTests(unittest.TestCase):
         self.assertIn("/sys:/host-sys:ro", command)
 
     @patch.object(deploy, "remote")
+    @patch.object(deploy, "remote_capture")
+    def test_existing_podman_secret_is_preserved(self, remote_capture, remote):
+        remote_capture.side_effect = ["yes", "existing-secret-id"]
+        target = deploy.Target("dev", "10.0.0.5", "arma3")
+
+        deploy.ensure_runtime(target)
+
+        secret_creates = [
+            call for call in remote.call_args_list
+            if call.args[1][:3] == ["podman", "secret", "create"]
+        ]
+        self.assertEqual([], secret_creates)
+
+    @patch.object(deploy, "remote")
     def test_build_does_not_prune_before_container_replacement(self, remote):
         target = deploy.Target("dev", "10.0.0.5", "arma3")
 
         image = deploy.build_image(target, "/release", "20260714010000", "api")
 
         self.assertEqual("localhost/arma3-manager-api:20260714010000", image)
-        remote.assert_called_once_with(
-            target,
-            [
-                "podman", "build", "--file", "/release/Containerfile.api", "--tag",
-                "localhost/arma3-manager-api:20260714010000", "/release",
-            ],
-        )
+        command = remote.call_args.args[1]
+        self.assertEqual("podman", command[0])
+        self.assertEqual("build", command[1])
+        self.assertIn("--build-arg", command)
+        self.assertEqual("/release/Containerfile.api", command[command.index("--file") + 1])
+        self.assertEqual("localhost/arma3-manager-api:20260714010000", command[command.index("--tag") + 1])
+        self.assertEqual("/release", command[-1])
+
+    def test_contract_labels_identify_instance_and_role(self):
+        labels = deploy.contract_labels("a" * 32, "api")
+        self.assertIn("io.gameserver-manager.contract.version=1.0", labels)
+        self.assertIn("io.gameserver-manager.instance.id=" + "a" * 32, labels)
+        self.assertIn("io.gameserver-manager.role=api", labels)
 
     @patch.object(deploy, "remote")
     def test_prune_is_all_unused_images_but_only_for_project_label(self, remote):
@@ -132,7 +158,11 @@ class DeployConfigTests(unittest.TestCase):
                     patch.object(deploy, "remote", return_value=CompletedProcess([], 0)),
                     patch.object(deploy, "confirm_backend"),
                     patch.object(deploy, "upload_release", return_value="/release"),
-                    patch.object(deploy, "ensure_runtime"),
+                    patch.object(deploy, "upload_secrets", side_effect=lambda *unused: events.append("secrets")),
+                    patch.object(deploy, "ensure_runtime", side_effect=lambda *unused: events.append("runtime")),
+                    patch.object(deploy, "prepare_contract_runtime", return_value=("a" * 32, "b" * 32)),
+                    patch.object(deploy, "finish_contract_runtime", side_effect=lambda *unused: events.append("finish")),
+                    patch.object(deploy, "sync_contract_runtime", side_effect=lambda *unused: events.append("sync")),
                     patch.object(deploy, "build_image", return_value="localhost/arma3-manager-api:new"),
                     patch.object(deploy, "api_command", return_value=["podman", "run", "image"]),
                     patch.object(deploy, "current_image", return_value="localhost/arma3-manager-api:old"),
@@ -142,7 +172,7 @@ class DeployConfigTests(unittest.TestCase):
                 ):
                     self.assertEqual(0, deploy.deploy(args))
 
-                self.assertEqual(["replace", "restart", "prune"], events)
+                self.assertEqual(["secrets", "runtime", "replace", "restart", "prune", "sync", "finish"], events)
 
 
 if __name__ == "__main__":

@@ -204,6 +204,31 @@ Panel hinter einem lokalen Reverse-Proxy stehen soll.
 Ein Backend-Update stoppt den Arma-3-Prozess, da dieser derzeit im
 API-Container läuft. Deshalb ist eine Bestätigung oder `--yes` erforderlich.
 
+## Server-Manager-v1-Vertrag
+
+Dieses Repository implementiert den gemeinsamen Vertrag in
+[`server-manager.contract.json`](server-manager.contract.json) und das lokale
+JSON-Protokoll in [`manager_driver.py`](manager_driver.py). Das erste
+Deployment des Patches behält das Podman-Secret, die Konfiguration, alle vier
+Volumes, das Netzwerk, die Ports und die vorhandenen Daten bei. Es speichert
+eine stabile UUID und erstellt nur die ausgewählten Container mit den
+v1-OCI-Labels neu. Das Runtime-Manifest enthält reale Image-Referenzen, aber
+niemals Secret-Werte.
+
+Der Hub kann diese Instanz unter demselben Host und Unix-Benutzer erkennen und
+vor Ort übernehmen. Die Übernahme erstellt eine private `controller.json`
+(`0600`), und ein Lock pro Instanz serialisiert alle Operationen. Solange ein
+Hub-Claim besteht, weist `deploy.py` manuelle Änderungen zurück. Das Trennen
+gibt die Kontrolle frei, ohne Ressourcen zu stoppen oder zu löschen; danach
+ist das manuelle Deployment wieder möglich.
+
+Diese erste Version veröffentlicht Erkennung, Übernahme, Lebenszyklus,
+Gesundheitsprüfung und Trennung als Fähigkeiten. Noch nicht angekündigte
+Standardbefehle — Provisionierung, Recreate, Update, Secret-Rotation und
+Zerstörung — liefern eine typisierte Nicht-Unterstützt-Antwort und dürfen vom
+Hub nicht angeboten werden. Die kanonische Spezifikation, Secret-Richtlinie
+und das Übernahmeverfahren liegen unter `game_servers_manager_hub/docs/`.
+
 ## Backend-Dokumentation
 
 ```bash

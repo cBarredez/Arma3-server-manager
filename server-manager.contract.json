@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cBarredez/game_servers_manager_hub/main/contracts/v1/server-manager-contract.schema.json",
+  "contractVersion": "1.0",
+  "managerId": "arma3-server-manager",
+  "gameType": "arma3",
+  "displayName": "Arma 3",
+  "driver": {
+    "protocolVersion": "1.0",
+    "entrypoint": "manager_driver.py"
+  },
+  "requiredContainerRoles": ["api", "frontend"],
+  "capabilities": [
+    "discover",
+    "adopt",
+    "lifecycle",
+    "health",
+    "detach"
+  ],
+  "secretSlots": [
+    { "id": "manager-secrets", "provider": "podman", "required": true }
+  ]
+}

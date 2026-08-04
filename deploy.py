@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -23,6 +25,7 @@ SECRETS_FILE = ROOT / "config" / "manager.secrets.toml"
 NETWORK = "arma3-net"
 PODMAN_SECRET = "arma3-manager-secrets"
 PROJECT_IMAGE_LABEL = "project=arma3-manager"
+CONTRACT_LABEL_PREFIX = "io.gameserver-manager"
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,20 @@ def remote(target: Target, args: list[str], *, check: bool = True) -> subprocess
 
 def remote_capture(target: Target, args: list[str], *, check: bool = True) -> str:
     return capture(["ssh"] + _ssh_opts(target) + [target.ssh, shlex.join(args)], check=check)
+
+
+def remote_driver(target: Target, remote_dir: str, command: str, *args: str, check: bool = True) -> dict:
+    """Invoke the local contract driver on the target and parse its JSON result."""
+    result = remote_capture(target, ["python3", f"{remote_dir}/manager_driver.py", command, *args], check=check)
+    if not result:
+        return {}
+    try:
+        value = json.loads(result)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"Arma manager driver returned invalid JSON for {command}") from error
+    if not isinstance(value, dict):
+        raise SystemExit(f"Arma manager driver returned a non-object result for {command}")
+    return value
 
 
 def load_target(environment: str) -> Target:
@@ -125,6 +142,11 @@ def manager_config() -> dict:
 def validate_secrets() -> dict:
     if not SECRETS_FILE.exists():
         raise SystemExit("Missing config/manager.secrets.toml; copy the example and set secure values")
+    secret_stat = SECRETS_FILE.lstat()
+    if not stat.S_ISREG(secret_stat.st_mode) or SECRETS_FILE.is_symlink():
+        raise SystemExit("config/manager.secrets.toml must be a regular file, not a symlink")
+    if stat.S_IMODE(secret_stat.st_mode) & 0o077:
+        raise SystemExit("config/manager.secrets.toml must have mode 0600")
     secrets = tomllib.loads(SECRETS_FILE.read_text(encoding="utf-8"))
     web = secrets.get("web", {})
     password = str(web.get("password", ""))
@@ -174,10 +196,19 @@ def upload_release(target: Target, release: str) -> str:
     archive_code = archive.wait()
     if archive_code or extract.returncode:
         raise SystemExit("Project transfer failed")
-    if SECRETS_FILE.exists():
+    return remote_dir
+
+
+def upload_secrets(target: Target) -> None:
+    """Transfer secrets only after the driver grants a manual-deploy lock."""
+    existing = remote_capture(
+        target,
+        ["podman", "secret", "inspect", "--format", "{{.ID}}", PODMAN_SECRET],
+        check=False,
+    )
+    if not existing and SECRETS_FILE.exists():
         run(["scp"] + _ssh_opts(target) + [str(SECRETS_FILE), f"{target.ssh}:{target.remote_root}/config/manager.secrets.toml"])
         remote(target, ["chmod", "600", f"{target.remote_root}/config/manager.secrets.toml"])
-    return remote_dir
 
 
 def ensure_runtime(target: Target) -> None:
@@ -186,8 +217,13 @@ def ensure_runtime(target: Target) -> None:
         remote(target, ["podman", "volume", "create", volume], check=False)
     secret_file = f"{target.remote_root}/config/manager.secrets.toml"
     marker = remote_capture(target, ["sh", "-c", f"test -f {secret_file} && echo yes || true"], check=False)
-    if marker == "yes":
-        remote(target, ["podman", "secret", "create", "--replace", PODMAN_SECRET, secret_file])
+    existing_secret = remote_capture(
+        target,
+        ["podman", "secret", "inspect", "--format", "{{.ID}}", PODMAN_SECRET],
+        check=False,
+    )
+    if marker == "yes" and not existing_secret:
+        remote(target, ["podman", "secret", "create", PODMAN_SECRET, secret_file])
 
 
 def git_commit() -> str:
@@ -236,12 +272,25 @@ def secret_mount(target: Target) -> list[str]:
     return ["--secret", f"{PODMAN_SECRET},target=manager.secrets.toml"] if marker else []
 
 
-def api_command(target: Target, image: str, remote_dir: str) -> list[str]:
+def contract_labels(instance_id: str, role: str) -> list[str]:
+    values = {
+        f"{CONTRACT_LABEL_PREFIX}.contract.version": "1.0",
+        f"{CONTRACT_LABEL_PREFIX}.manager": "arma3-server-manager",
+        f"{CONTRACT_LABEL_PREFIX}.game": "arma3",
+        f"{CONTRACT_LABEL_PREFIX}.instance.id": instance_id,
+        f"{CONTRACT_LABEL_PREFIX}.role": role,
+    }
+    return [flag for key, value in values.items() for flag in ("--label", f"{key}={value}")]
+
+
+def api_command(target: Target, image: str, remote_dir: str, instance_id: str | None = None) -> list[str]:
     config = manager_config()
     web = config.get("web", {})
     server = config.get("server", {})
     network_mode = server.get("network_mode", "bridge")
     command = ["podman", "run", "-d", "--replace", "--name", "arma3-api", "--restart", "unless-stopped", "--memory", str(server.get("memory_limit", "25g")), "--health-cmd", f"curl -f http://127.0.0.1:{web.get('port', 8080)}/api/health", "--health-interval", "30s", "--health-retries", "3"]
+    if instance_id:
+        command += contract_labels(instance_id, "api")
     if network_mode == "host":
         command += ["--network", "host"]
     else:
@@ -257,12 +306,65 @@ def api_command(target: Target, image: str, remote_dir: str) -> list[str]:
     return command
 
 
-def frontend_command(image: str) -> list[str]:
+def frontend_command(image: str, instance_id: str | None = None) -> list[str]:
     config = manager_config()
     web = config.get("web", {})
     server = config.get("server", {})
     backend = f"host.containers.internal:{web.get('port', 8080)}" if server.get("network_mode") == "host" else "arma3-api:8080"
-    return ["podman", "run", "-d", "--replace", "--name", "arma3-frontend", "--restart", "unless-stopped", "--network", NETWORK, "-p", f"{web.get('bind_ip', '127.0.0.1')}:{web.get('public_port', 8080)}:8080/tcp", "-e", "ARMA3_API_BASE=", "-e", "ARMA3_REST_ONLY=true", "-e", f"ARMA3_API_BACKEND={backend}", image]
+    command = ["podman", "run", "-d", "--replace", "--name", "arma3-frontend", "--restart", "unless-stopped"]
+    if instance_id:
+        command += contract_labels(instance_id, "frontend")
+    command += ["--network", NETWORK, "-p", f"{web.get('bind_ip', '127.0.0.1')}:{web.get('public_port', 8080)}:8080/tcp", "-e", "ARMA3_API_BASE=", "-e", "ARMA3_REST_ONLY=true", "-e", f"ARMA3_API_BACKEND={backend}", image]
+    return command
+
+
+def prepare_contract_runtime(target: Target, remote_dir: str) -> tuple[str, str]:
+    result = remote_driver(target, remote_dir, "ensure-id")
+    instance_id = str(result.get("instanceId", ""))
+    if len(instance_id) != 32:
+        raise SystemExit("Arma manager driver returned an invalid instance id")
+    # The operation record spans the whole multi-command deployment. A hub
+    # claim checks it under the same per-instance flock, so neither controller
+    # can enter while the other is active.
+    operation = remote_driver(target, remote_dir, "begin-deploy", "--instance-id", instance_id)
+    operation_id = str(operation.get("operationId", ""))
+    if len(operation_id) != 32:
+        raise SystemExit("Arma manager driver returned an invalid deployment operation id")
+    return instance_id, operation_id
+
+
+def finish_contract_runtime(target: Target, remote_dir: str, instance_id: str, operation_id: str) -> None:
+    remote_driver(
+        target,
+        remote_dir,
+        "end-deploy",
+        "--instance-id",
+        instance_id,
+        "--operation-id",
+        operation_id,
+        check=False,
+    )
+
+
+def sync_contract_runtime(target: Target, remote_dir: str, instance_id: str, operation_id: str) -> None:
+    # Selective first-time deployments may not have both services yet. They
+    # remain intentionally undiscoverable until the complete stack exists.
+    if current_image(target, "arma3-api") is None or current_image(target, "arma3-frontend") is None:
+        print("Contract metadata pending: both API and frontend must be deployed")
+        return
+    remote_driver(
+        target,
+        remote_dir,
+        "sync",
+        "--instance-id",
+        instance_id,
+        "--config-path",
+        f"{remote_dir}/config/manager.toml",
+        "--driver-path",
+        f"{remote_dir}/manager_driver.py",
+        "--operation-id",
+        operation_id,
+    )
 
 
 def wait_healthy(target: Target, container: str, timeout: int = 120) -> bool:
@@ -307,19 +409,25 @@ def deploy(args: argparse.Namespace) -> int:
         confirm_backend(target, args.yes)
     release = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     remote_dir = upload_release(target, release)
-    ensure_runtime(target)
-    if args.backend:
-        image = build_image(target, remote_dir, release, "api")
-        replace(target, "arma3-api", image, api_command(target, image, remote_dir), current_image(target, "arma3-api"))
-    if args.frontend:
-        image = build_image(target, remote_dir, release, "frontend")
-        replace(target, "arma3-frontend", image, frontend_command(image), current_image(target, "arma3-frontend"))
-    elif args.backend:
-        restart_frontend_proxy(target)
-    # Cleanup must run after every selected container has been replaced. Before this point the old
-    # image is still associated with a container and Podman correctly considers it in use. `-a`
-    # includes old release-tagged images; the label filter excludes every unrelated host image.
-    prune_project_images(target)
+    instance_id, operation_id = prepare_contract_runtime(target, remote_dir)
+    try:
+        upload_secrets(target)
+        ensure_runtime(target)
+        if args.backend:
+            image = build_image(target, remote_dir, release, "api")
+            replace(target, "arma3-api", image, api_command(target, image, remote_dir, instance_id), current_image(target, "arma3-api"))
+        if args.frontend:
+            image = build_image(target, remote_dir, release, "frontend")
+            replace(target, "arma3-frontend", image, frontend_command(image, instance_id), current_image(target, "arma3-frontend"))
+        elif args.backend:
+            restart_frontend_proxy(target)
+        # Cleanup must run after every selected container has been replaced. Before this point the old
+        # image is still associated with a container and Podman correctly considers it in use. `-a`
+        # includes old release-tagged images; the label filter excludes every unrelated host image.
+        prune_project_images(target)
+        sync_contract_runtime(target, remote_dir, instance_id, operation_id)
+    finally:
+        finish_contract_runtime(target, remote_dir, instance_id, operation_id)
     print(f"Deployment {release} to {target.environment} completed")
     return 0
 
